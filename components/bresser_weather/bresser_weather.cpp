@@ -12,13 +12,10 @@
 #include <cstdio>
 #include <cstring>
 
-// Bit-bang SPI critical-section guard. WiFi/API/HTTP tasks on ESP32 will
-// preempt our bit-bang loop and stretch CLK pulses to milliseconds, which
-// makes the CC1101 latch the wrong bit. portENTER_CRITICAL disables both
-// task switching and most interrupts on the calling core for the duration
-// of one byte transfer — long enough to keep timing tight, short enough
-// (≈120 us at 100 kHz) that WiFi tolerates it.
-static portMUX_TYPE s_bitbang_mux = portMUX_INITIALIZER_UNLOCKED;
+// (portENTER_CRITICAL removed in v0.2.11 — on ESP-IDF v5.5 dual-core it
+// added enough overhead to break the bit-bang's setup() reads. The hardware
+// SPI peripheral is interrupt-safe by design, so v0.2.11 makes that the
+// default and bit-bang becomes opt-in for boards where hw SPI conflicts.)
 
 namespace esphome {
 namespace bresser_weather {
@@ -138,19 +135,15 @@ void BresserWeather::cc1101_deselect_() { digitalWrite(this->cs_pin_, HIGH); }
 uint8_t BresserWeather::bitbang_xfer_(uint8_t out) {
   uint8_t in = 0;
   uint32_t hp = this->bitbang_half_period_us_;
-  // Disable task switching + interrupts for one byte — keeps WiFi/API
-  // from stretching CLK pulses mid-transfer.
-  portENTER_CRITICAL(&s_bitbang_mux);
   for (int i = 7; i >= 0; --i) {
     digitalWrite(this->mosi_pin_, (out >> i) & 1 ? HIGH : LOW);
-    if (hp) delayMicroseconds(hp);  // MOSI setup time
+    if (hp) delayMicroseconds(hp);
     digitalWrite(this->clk_pin_, HIGH);
-    if (hp) delayMicroseconds(hp);  // CLK high half — MISO sample window
+    if (hp) delayMicroseconds(hp);
     in = (in << 1) | (digitalRead(this->miso_pin_) ? 1 : 0);
     digitalWrite(this->clk_pin_, LOW);
-    if (hp) delayMicroseconds(hp);  // CLK low half — chip updates MISO
+    if (hp) delayMicroseconds(hp);
   }
-  portEXIT_CRITICAL(&s_bitbang_mux);
   return in;
 }
 
@@ -535,7 +528,7 @@ void BresserWeather::setup() {
   // ESP_LOGE here only reaches a serial console. We capture all diagnostic
   // results into member fields so the early loop() iterations can re-emit
   // them — that way the user sees them over OTA too.
-  ESP_LOGE(TAG, "=== bresser_weather setup() entry (v0.2.10) ===");
+  ESP_LOGE(TAG, "=== bresser_weather setup() entry (v0.2.11) ===");
   ESP_LOGE(TAG, "  pins MOSI=%d MISO=%d CLK=%d CS=%d GDO0=%d GDO2=%d",
            mosi_pin_, miso_pin_, clk_pin_, cs_pin_, gdo0_pin_, gdo2_pin_);
   ESP_LOGE(TAG, "  SPI mode: %s @ %u Hz",

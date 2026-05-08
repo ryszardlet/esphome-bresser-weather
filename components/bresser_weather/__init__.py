@@ -71,10 +71,10 @@ CONFIG_SCHEMA = cv.Schema(
             CONF_STATUS_INTERVAL, default="10s"
         ): cv.positive_time_period_milliseconds,
         cv.Optional(CONF_RAW_DUMP_TOPIC, default=""): cv.string,
-        cv.Optional(CONF_SPI_MODE, default="bitbang"): cv.one_of(
+        cv.Optional(CONF_SPI_MODE, default="hardware"): cv.one_of(
             "hardware", "bitbang", lower=True
         ),
-        cv.Optional(CONF_SPI_CLOCK_HZ, default=100_000): cv.positive_int,
+        cv.Optional(CONF_SPI_CLOCK_HZ, default=1_000_000): cv.positive_int,
     }
 ).extend(cv.COMPONENT_SCHEMA)
 

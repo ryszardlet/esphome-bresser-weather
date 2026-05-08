@@ -139,7 +139,7 @@ class BresserWeather : public Component {
 
   bool radio_ready_{false};
   SPIClass *spi_{nullptr};
-  bool bitbang_spi_{true};
+  bool bitbang_spi_{false};
   uint32_t spi_clock_hz_{4000000};
   uint32_t bitbang_half_period_us_{1};
   SPISettings spi_settings_{4000000, MSBFIRST, SPI_MODE0};
