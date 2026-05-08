@@ -1,0 +1,58 @@
+# Example ESPHome configuration for the bresser_weather external component.
+# Tested against ESPHome 2026.4.x with an ESP32 DevKit and an E07-M1101D
+# (CC1101) radio module.
+
+esphome:
+  name: weather-station
+  friendly_name: Weather Station
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+
+logger:
+  level: DEBUG
+
+api:
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+external_components:
+  - source: github://ryszardlet/esphome-bresser-weather@main
+    components: [ bresser_weather ]
+
+bresser_weather:
+  mosi_pin: GPIO23
+  miso_pin: GPIO19
+  clk_pin: GPIO18
+  cs_pin: GPIO5
+  gdo0_pin: GPIO4
+  gdo2_pin: GPIO27
+  frequency: 868.30
+  log_unknown: true
+
+sensor:
+  - platform: bresser_weather
+    temperature:
+      name: "Temperatura zewnętrzna"
+    humidity:
+      name: "Wilgotność zewnętrzna"
+    wind_speed:
+      name: "Prędkość wiatru"
+    wind_direction:
+      name: "Kierunek wiatru"
+    rain_total:
+      name: "Suma opadów"
+    uv_index:
+      name: "Indeks UV"
+    light_lux:
+      name: "Natężenie światła"
+    pressure:
+      name: "Ciśnienie"
+    rssi:
+      name: "RSSI stacji"

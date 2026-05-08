@@ -1,0 +1,30 @@
+# ESPHome build artifacts
+.esphome/
+.pioenvs/
+.piolibdeps/
+.vscode/
+secrets.yaml
+
+# Build / object files
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.elf
+*.bin
+*.hex
+
+# Editors
+*.swp
+*.swo
+*~
+.idea/
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
