@@ -181,6 +181,14 @@ class BresserWeather : public Component {
   bool diag_mosi_low_ok_{false};
   bool diag_clk_high_ok_{false};
   bool diag_clk_low_ok_{false};
+  // Defaults of CC1101 registers post-SRES; if any of these reads back its
+  // expected default, the chip is talking to us properly.
+  uint8_t diag_default_iocfg2_{0xFF};   // expect 0x29
+  uint8_t diag_default_fsctrl1_{0xFF};  // expect 0x0F
+  uint8_t diag_default_mdmcfg3_{0xFF};  // expect 0x83
+  uint8_t diag_default_test2_{0xFF};    // expect 0x88
+  uint8_t diag_default_iocfg2_after_write_{0xFF};
+  bool diag_any_default_match_{false};
   uint16_t diag_wake_test_bits_{0};
   uint8_t diag_wake_test_highs_{0};
   uint8_t diag_wake_test_lows_{0};

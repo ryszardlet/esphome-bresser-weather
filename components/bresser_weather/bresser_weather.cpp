@@ -519,7 +519,7 @@ void BresserWeather::setup() {
   // ESP_LOGE here only reaches a serial console. We capture all diagnostic
   // results into member fields so the early loop() iterations can re-emit
   // them — that way the user sees them over OTA too.
-  ESP_LOGE(TAG, "=== bresser_weather setup() entry (v0.2.6) ===");
+  ESP_LOGE(TAG, "=== bresser_weather setup() entry (v0.2.7) ===");
   ESP_LOGE(TAG, "  pins MOSI=%d MISO=%d CLK=%d CS=%d GDO0=%d GDO2=%d",
            mosi_pin_, miso_pin_, clk_pin_, cs_pin_, gdo0_pin_, gdo2_pin_);
   ESP_LOGE(TAG, "  SPI mode: %s @ %u Hz",
@@ -675,6 +675,38 @@ void BresserWeather::setup() {
   ESP_LOGE(TAG, "  PARTNUM=0x%02X VERSION=0x%02X", this->diag_partnum_,
            this->diag_version_);
 
+  // ---- Read non-zero hardware defaults ----
+  // After SRES the CC1101 has well-known default values in many config
+  // registers. If reads work, we should see those exact values without
+  // having written anything yet. If we see 0x00 on all of them, MOSI bytes
+  // aren't reaching the chip at all — chip is just outputting status byte.
+  this->diag_default_iocfg2_ = this->cc1101_read_reg_(0x00);   // expect 0x29
+  this->diag_default_fsctrl1_ = this->cc1101_read_reg_(0x0B);  // expect 0x0F
+  this->diag_default_mdmcfg3_ = this->cc1101_read_reg_(0x11);  // expect 0x83
+  this->diag_default_test2_ = this->cc1101_read_reg_(0x2C);    // expect 0x88
+  ESP_LOGE(TAG, "  reg defaults: IOCFG2=0x%02X (exp 0x29) FSCTRL1=0x%02X (exp 0x0F) "
+                "MDMCFG3=0x%02X (exp 0x83) TEST2=0x%02X (exp 0x88)",
+           this->diag_default_iocfg2_, this->diag_default_fsctrl1_,
+           this->diag_default_mdmcfg3_, this->diag_default_test2_);
+  this->diag_any_default_match_ = (this->diag_default_iocfg2_ == 0x29) ||
+                                  (this->diag_default_fsctrl1_ == 0x0F) ||
+                                  (this->diag_default_mdmcfg3_ == 0x83) ||
+                                  (this->diag_default_test2_ == 0x88);
+  if (this->diag_any_default_match_) {
+    ESP_LOGE(TAG, "  >>> at least one default matches — chip-side READS work");
+  } else {
+    ESP_LOGE(TAG, "  >>> NO defaults match — chip not parsing read commands");
+  }
+
+  // Now write IOCFG2 to a known value and read back. If this still fails
+  // after a successful default read, the chip is read-only on our bus.
+  this->cc1101_write_reg_(0x00, 0x55);
+  this->diag_default_iocfg2_after_write_ = this->cc1101_read_reg_(0x00);
+  ESP_LOGE(TAG, "  IOCFG2 wrote 0x55, read back 0x%02X — %s",
+           this->diag_default_iocfg2_after_write_,
+           this->diag_default_iocfg2_after_write_ == 0x55 ? "WRITES WORK"
+                                                          : "WRITES FAIL");
+
   // ---- Write-then-read echo test on a benign writable register ----
   ESP_LOGE(TAG, "  echo test on FSCTRL0 (write→read three patterns):");
   for (int i = 0; i < 3; ++i) {
@@ -760,6 +792,17 @@ void BresserWeather::loop() {
                this->diag_snop_status_);
       ESP_LOGE(TAG, "[BOOT-DIAG] PARTNUM=0x%02X VERSION=0x%02X (expect 0x00 / 0x14)",
                this->diag_partnum_, this->diag_version_);
+      ESP_LOGE(TAG, "[BOOT-DIAG] post-reset defaults: IOCFG2=0x%02X(exp 0x29) "
+                    "FSCTRL1=0x%02X(0x0F) MDMCFG3=0x%02X(0x83) TEST2=0x%02X(0x88) -> %s",
+               this->diag_default_iocfg2_, this->diag_default_fsctrl1_,
+               this->diag_default_mdmcfg3_, this->diag_default_test2_,
+               this->diag_any_default_match_
+                   ? "CHIP READS WORK"
+                   : "*** CHIP DEAF — no defaults match ***");
+      ESP_LOGE(TAG, "[BOOT-DIAG] IOCFG2 write-back test: wrote 0x55 read 0x%02X — %s",
+               this->diag_default_iocfg2_after_write_,
+               this->diag_default_iocfg2_after_write_ == 0x55 ? "WRITES WORK"
+                                                              : "WRITES FAIL");
       for (int i = 0; i < 3; ++i) {
         ESP_LOGE(TAG, "[BOOT-DIAG] echo wrote=0x%02X read=0x%02X — %s",
                  this->diag_echo_written_[i], this->diag_echo_read_[i],
@@ -781,7 +824,15 @@ void BresserWeather::loop() {
       bool clk_ok = this->diag_clk_high_ok_ && this->diag_clk_low_ok_;
       bool miso_unchanging = (this->diag_wake_test_highs_ == 16 ||
                               this->diag_wake_test_lows_ == 16);
-      if (!mosi_ok) {
+      if (this->diag_default_iocfg2_after_write_ == 0x55) {
+        ESP_LOGE(TAG, "[BOOT-DIAG] verdict: SPI fully working — bug downstream "
+                      "(register config or RX state machine).");
+      } else if (this->diag_any_default_match_) {
+        ESP_LOGE(TAG, "[BOOT-DIAG] verdict: chip READS work but WRITES fail. "
+                      "Most likely MOSI line damaged at chip end (GPIO%d→chip "
+                      "trace) or chip is write-protected.",
+                 this->mosi_pin_);
+      } else if (!mosi_ok) {
         ESP_LOGE(TAG, "[BOOT-DIAG] verdict: MOSI pin (GPIO%d) NOT DRIVING. "
                       "Chip never sees commands. Check for another component "
                       "fighting GPIO%d, or pin damage.",
