@@ -137,7 +137,9 @@ class BresserWeather : public Component {
 
   bool radio_ready_{false};
   SPIClass *spi_{nullptr};
-  SPISettings spi_settings_{4000000, MSBFIRST, SPI_MODE0};
+  // Default 1 MHz — well within CC1101 datasheet limits, far more tolerant
+  // of long jumper wires and breadboard parasitics than 4 MHz.
+  SPISettings spi_settings_{1000000, MSBFIRST, SPI_MODE0};
 
   std::vector<BresserWeatherSensor *> sensors_;
 

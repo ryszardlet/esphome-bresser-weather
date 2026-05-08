@@ -209,7 +209,7 @@ void BresserWeather::cc1101_write_burst_(uint8_t addr, const uint8_t *buf,
 // (which works on the user's same hardware), with explicit CS+transaction
 // wrap around the SRES strobe.
 void BresserWeather::cc1101_reset_() {
-  ESP_LOGI(TAG, "  CC1101 reset: CS dance + SRES strobe");
+  ESP_LOGE(TAG, "  >>> CC1101 reset: CS dance + SRES strobe");
   digitalWrite(this->cs_pin_, HIGH);
   delayMicroseconds(40);
   digitalWrite(this->cs_pin_, LOW);
@@ -224,7 +224,7 @@ void BresserWeather::cc1101_reset_() {
   bool miso_ok_post = this->cc1101_wait_miso_low_();
   digitalWrite(this->cs_pin_, HIGH);
   delay(10);
-  ESP_LOGI(TAG, "  reset: SRES status byte=0x%02X miso_pre=%s miso_post=%s",
+  ESP_LOGE(TAG, "      SRES status byte=0x%02X miso_pre=%s miso_post=%s",
            reset_status, miso_ok_pre ? "LOW" : "HIGH/timeout",
            miso_ok_post ? "LOW" : "HIGH/timeout");
 }
@@ -428,25 +428,25 @@ void BresserWeather::apply_preset_(const RadioPreset &p) {
 
 void BresserWeather::log_register_dump_() {
   uint8_t marc = this->cc1101_read_status_(reg::MARCSTATE);
-  ESP_LOGI(TAG, "Register dump after init:");
-  ESP_LOGI(TAG, "  PARTNUM=0x%02X VERSION=0x%02X MARCSTATE=0x%02X",
+  ESP_LOGE(TAG, "  >>> Register dump after init:");
+  ESP_LOGE(TAG, "      PARTNUM=0x%02X VERSION=0x%02X MARCSTATE=0x%02X",
            this->cc1101_read_status_(reg::PARTNUM),
            this->cc1101_read_status_(reg::VERSION), marc);
-  ESP_LOGI(TAG, "  FREQ=%02X%02X%02X", this->cc1101_read_reg_(reg::FREQ2),
+  ESP_LOGE(TAG, "      FREQ=%02X%02X%02X", this->cc1101_read_reg_(reg::FREQ2),
            this->cc1101_read_reg_(reg::FREQ1),
            this->cc1101_read_reg_(reg::FREQ0));
-  ESP_LOGI(TAG, "  MDMCFG4=0x%02X MDMCFG3=0x%02X MDMCFG2=0x%02X DEVIATN=0x%02X",
+  ESP_LOGE(TAG, "      MDMCFG4=0x%02X MDMCFG3=0x%02X MDMCFG2=0x%02X DEVIATN=0x%02X",
            this->cc1101_read_reg_(reg::MDMCFG4),
            this->cc1101_read_reg_(reg::MDMCFG3),
            this->cc1101_read_reg_(reg::MDMCFG2),
            this->cc1101_read_reg_(reg::DEVIATN));
-  ESP_LOGI(TAG, "  SYNC=%02X%02X PKTLEN=0x%02X PKTCTRL0=0x%02X PKTCTRL1=0x%02X",
+  ESP_LOGE(TAG, "      SYNC=%02X%02X PKTLEN=0x%02X PKTCTRL0=0x%02X PKTCTRL1=0x%02X",
            this->cc1101_read_reg_(reg::SYNC1),
            this->cc1101_read_reg_(reg::SYNC0),
            this->cc1101_read_reg_(reg::PKTLEN),
            this->cc1101_read_reg_(reg::PKTCTRL0),
            this->cc1101_read_reg_(reg::PKTCTRL1));
-  ESP_LOGI(TAG, "  AGCCTRL2/1/0=0x%02X/0x%02X/0x%02X FREND1=0x%02X",
+  ESP_LOGE(TAG, "      AGCCTRL2/1/0=0x%02X/0x%02X/0x%02X FREND1=0x%02X",
            this->cc1101_read_reg_(reg::AGCCTRL2),
            this->cc1101_read_reg_(reg::AGCCTRL1),
            this->cc1101_read_reg_(reg::AGCCTRL0),
@@ -461,56 +461,86 @@ void BresserWeather::log_register_dump_() {
 // Component lifecycle
 // ---------------------------------------------------------------------------
 void BresserWeather::setup() {
-  // FIRST line — if this isn't in the log, ESPHome isn't even calling us.
-  ESP_LOGI(TAG, "setup() entry");
-  ESP_LOGI(TAG, "  pins MOSI=%d MISO=%d CLK=%d CS=%d GDO0=%d GDO2=%d",
+  // Setup logs use ESP_LOGE so they're always visible — even when the user's
+  // logger config has 'bresser_weather: WARN' or filters set up. Once a
+  // working version is reached, lower these to LOGI in a follow-up release.
+  ESP_LOGE(TAG, "=== bresser_weather setup() entry (v0.2.2) ===");
+  ESP_LOGE(TAG, "  pins MOSI=%d MISO=%d CLK=%d CS=%d GDO0=%d GDO2=%d",
            mosi_pin_, miso_pin_, clk_pin_, cs_pin_, gdo0_pin_, gdo2_pin_);
 
-  ESP_LOGI(TAG, "  configuring GPIOs...");
+  ESP_LOGE(TAG, "  configuring GPIOs (MISO with INPUT_PULLUP)...");
   pinMode(this->cs_pin_, OUTPUT);
   digitalWrite(this->cs_pin_, HIGH);
+  // MISO with internal pull-up: if the line is floating (chip not powered,
+  // not selected, etc.) we'd see HIGH instead of 0x00 reads, which is a far
+  // clearer fault signal than "all zeros".
+  pinMode(this->miso_pin_, INPUT_PULLUP);
   pinMode(this->gdo0_pin_, INPUT);
   if (this->gdo2_pin_ >= 0) pinMode(this->gdo2_pin_, INPUT);
-  ESP_LOGI(TAG, "  GPIOs configured (CS=HIGH idle)");
+  ESP_LOGE(TAG, "  GPIOs configured (CS=HIGH idle, MISO=PULLUP)");
+
+  ESP_LOGE(TAG, "  pre-SPI MISO digital read=%s (HIGH expected = pull-up working)",
+           digitalRead(this->miso_pin_) ? "HIGH" : "LOW");
 
   // Default-construct SPIClass so Arduino-ESP32 3.x picks the SoC's right
   // peripheral (VSPI on classic, FSPI on S2/S3/C3). Passing 'VSPI' as a
   // bus id breaks builds on non-classic SoCs and is unnecessary.
-  ESP_LOGI(TAG, "  creating SPIClass and calling begin()...");
+  ESP_LOGE(TAG, "  creating SPIClass and calling begin() at 1 MHz SPI clock...");
   this->spi_ = new SPIClass();
   this->spi_->begin(this->clk_pin_, this->miso_pin_, this->mosi_pin_,
                     this->cs_pin_);
   delay(10);
-  ESP_LOGI(TAG, "  SPI bus up");
+  ESP_LOGE(TAG, "  SPI bus up; post-begin MISO=%s",
+           digitalRead(this->miso_pin_) ? "HIGH" : "LOW");
 
-  // Quick loopback — drive a SNOP strobe (0x3D) and log the status byte.
-  // The first byte returned over MOSI when any strobe is sent is the
-  // CC1101 status byte. If MISO is dead this comes back as 0xFF.
-  ESP_LOGI(TAG, "  SPI sanity: sending SNOP strobe");
+  // ---- SNOP loopback ----
+  ESP_LOGE(TAG, "  >>> SPI sanity test: SNOP strobe (0x3D)");
   this->cc1101_select_();
-  this->cc1101_wait_miso_low_();
+  bool miso_ready = this->cc1101_wait_miso_low_();
+  ESP_LOGE(TAG, "      after CS LOW, MISO went LOW: %s",
+           miso_ready ? "YES" : "NO/timeout");
   this->spi_->beginTransaction(this->spi_settings_);
   uint8_t snop_status = this->spi_->transfer(0x3D);
   this->spi_->endTransaction();
   this->cc1101_deselect_();
-  ESP_LOGI(TAG, "  SNOP returned status byte=0x%02X (0xFF = MISO stuck high)",
-           snop_status);
+  ESP_LOGE(TAG, "      SNOP returned status byte=0x%02X (0xFF=MISO stuck high, "
+                "0x00=MISO stuck low / chip dead)", snop_status);
 
   this->cc1101_reset_();
 
-  bool probe_ok = this->cc1101_probe_();
+  // ---- Direct PARTNUM/VERSION read with verbose timing ----
+  ESP_LOGE(TAG, "  >>> probing PARTNUM(0x30 burst)...");
+  uint8_t partnum = this->cc1101_read_status_(reg::PARTNUM);
+  ESP_LOGE(TAG, "      PARTNUM=0x%02X", partnum);
+
+  ESP_LOGE(TAG, "  >>> probing VERSION(0x31 burst)...");
+  uint8_t version = this->cc1101_read_status_(reg::VERSION);
+  ESP_LOGE(TAG, "      VERSION=0x%02X (expected 0x04 or 0x14)", version);
+
+  // ---- Write-then-read echo test on a benign writable register ----
+  // FSCTRL0 (0x0C) is an 8-bit signed offset that is fully writable; the chip
+  // accepts any value 0x00..0xFF. We round-trip three patterns to prove SPI
+  // both directions are working.
+  ESP_LOGE(TAG, "  >>> SPI echo test on FSCTRL0 (write then read back)");
+  for (uint8_t pattern : (uint8_t[]) {0x55, 0xAA, 0x42}) {
+    this->cc1101_write_reg_(reg::FSCTRL0, pattern);
+    uint8_t got = this->cc1101_read_reg_(reg::FSCTRL0);
+    ESP_LOGE(TAG, "      wrote 0x%02X, read 0x%02X — %s", pattern, got,
+             (got == pattern) ? "OK" : "MISMATCH (SPI broken)");
+  }
+  this->cc1101_write_reg_(reg::FSCTRL0, 0x00);  // restore default
+
+  bool probe_ok = (version != 0x00 && version != 0xFF);
   if (!probe_ok) {
-    ESP_LOGE(TAG, "CC1101 probe failed — keeping component active for "
-                  "diagnostics; expect bogus readings until wiring is fixed.");
-    // NB: deliberately NOT calling mark_failed() so dump_config / loop /
-    // status heartbeat keep running.
+    ESP_LOGE(TAG, "  *** CC1101 probe FAILED. VERSION=0x%02X. ***", version);
+    ESP_LOGE(TAG, "  Keeping component active for further diagnostics; "
+                  "the heartbeat below will keep showing register state.");
   } else {
-    ESP_LOGI(TAG, "  CC1101 detected OK");
+    ESP_LOGE(TAG, "  *** CC1101 detected OK (PARTNUM=0x%02X VERSION=0x%02X) ***",
+             partnum, version);
   }
 
-  // Always pin the configured frequency into the canonical preset (index 0)
-  // so users can move from EU 868.30 to e.g. US 915 without forking the code.
-  ESP_LOGI(TAG, "  applying default preset (canonical 8.21 kbps / 57 kHz)...");
+  ESP_LOGE(TAG, "  applying default preset (canonical 8.21 kbps / 57 kHz)...");
   RadioPreset live = PRESETS[0];
   live.freq_hz = this->configured_freq_hz_;
   this->apply_preset_(live);
@@ -518,10 +548,10 @@ void BresserWeather::setup() {
   this->radio_ready_ = probe_ok;
 
   this->scan_started_ms_ = millis();
-  ESP_LOGI(TAG, "setup() complete — listening on %.3f MHz (radio_ready=%s)",
+  ESP_LOGE(TAG, "=== setup() complete — listening on %.3f MHz (radio_ready=%s) ===",
            this->configured_freq_hz_ / 1e6f, YESNO(this->radio_ready_));
   if (this->scan_mode_) {
-    ESP_LOGI(TAG, "Scan mode ENABLED - cycling %u presets every %u ms",
+    ESP_LOGE(TAG, "Scan mode ENABLED - cycling %u presets every %u ms",
              (unsigned) PRESET_COUNT, this->scan_interval_ms_);
   }
 }
