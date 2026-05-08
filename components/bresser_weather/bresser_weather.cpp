@@ -523,7 +523,7 @@ void BresserWeather::setup() {
   // ESP_LOGE here only reaches a serial console. We capture all diagnostic
   // results into member fields so the early loop() iterations can re-emit
   // them — that way the user sees them over OTA too.
-  ESP_LOGE(TAG, "=== bresser_weather setup() entry (v0.2.8) ===");
+  ESP_LOGE(TAG, "=== bresser_weather setup() entry (v0.2.9) ===");
   ESP_LOGE(TAG, "  pins MOSI=%d MISO=%d CLK=%d CS=%d GDO0=%d GDO2=%d",
            mosi_pin_, miso_pin_, clk_pin_, cs_pin_, gdo0_pin_, gdo2_pin_);
   ESP_LOGE(TAG, "  SPI mode: %s @ %u Hz",
@@ -915,8 +915,14 @@ void BresserWeather::loop() {
              this->diag_default_iocfg2_after_write_ == 0x55 ? "WRITES-OK"
                                                             : "WRITES-DEAD");
     if (marc != 0x0D) {
-      ESP_LOGW(TAG, "MARCSTATE=0x%02X != RX(0x0D) - re-entering RX", marc);
-      this->cc1101_enter_rx_();
+      ESP_LOGW(TAG, "MARCSTATE=0x%02X != RX(0x0D) - full preset re-apply",
+               marc);
+      // Don't just SRX — full reset+reconfig in case prior writes were
+      // lost on the SPI bus and chip has stale defaults.
+      RadioPreset live = PRESETS[this->current_preset_idx_];
+      if (this->current_preset_idx_ == 0)
+        live.freq_hz = this->configured_freq_hz_;
+      this->apply_preset_(live);
     }
   }
 

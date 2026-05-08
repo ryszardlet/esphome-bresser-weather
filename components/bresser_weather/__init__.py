@@ -63,7 +63,7 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_GDO2_PIN): pins.internal_gpio_input_pin_number,
         cv.Optional(CONF_FREQUENCY, default="868.300"): _frequency_mhz,
         cv.Optional(CONF_LOG_UNKNOWN, default=True): cv.boolean,
-        cv.Optional(CONF_SCAN_MODE, default=False): cv.boolean,
+        cv.Optional(CONF_SCAN_MODE, default=True): cv.boolean,
         cv.Optional(
             CONF_SCAN_INTERVAL, default="30s"
         ): cv.positive_time_period_milliseconds,
