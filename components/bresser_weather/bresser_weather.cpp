@@ -22,6 +22,10 @@ namespace bresser_weather {
 
 static const char *const TAG = "bresser_weather";
 
+// Bump on every release. Logged at boot AND in dump_config so users can
+// confirm the firmware they think they flashed is actually running.
+static const char *const COMPONENT_VERSION = "v0.2.12";
+
 // ---------------------------------------------------------------------------
 // CC1101 register addresses
 // ---------------------------------------------------------------------------
@@ -290,6 +294,41 @@ void BresserWeather::cc1101_reset_() {
   ESP_LOGE(TAG, "      SRES status byte=0x%02X miso_pre=%s miso_post=%s",
            reset_status, miso_ok_pre ? "LOW" : "HIGH/timeout",
            miso_ok_post ? "LOW" : "HIGH/timeout");
+
+  // Verify the reset took: PARTNUM should be readable 0x00 and VERSION
+  // should be a non-zero/non-FF value. If chip is unresponsive, retry up
+  // to 4 more times with increasing power-on delays. Some CC1101 clones
+  // need more time after power-up before SPI works.
+  for (int attempt = 1; attempt <= 4; ++attempt) {
+    uint8_t v = this->cc1101_read_status_(reg::VERSION);
+    if (v != 0x00 && v != 0xFF) {
+      ESP_LOGE(TAG, "      reset OK on attempt %d (VERSION=0x%02X)", attempt, v);
+      return;
+    }
+    ESP_LOGE(TAG, "      reset attempt %d: VERSION=0x%02X — retrying with %d ms power-up delay",
+             attempt, v, 50 * attempt);
+    delay(50 * attempt);
+    digitalWrite(this->cs_pin_, HIGH);
+    delayMicroseconds(40);
+    digitalWrite(this->cs_pin_, LOW);
+    delayMicroseconds(40);
+    digitalWrite(this->cs_pin_, HIGH);
+    delayMicroseconds(40);
+    digitalWrite(this->cs_pin_, LOW);
+    this->cc1101_wait_miso_low_();
+    if (this->bitbang_spi_) {
+      this->bitbang_xfer_(reg::SRES);
+    } else {
+      this->spi_->beginTransaction(this->spi_settings_);
+      this->spi_->transfer(reg::SRES);
+      this->spi_->endTransaction();
+    }
+    this->cc1101_wait_miso_low_();
+    digitalWrite(this->cs_pin_, HIGH);
+    delay(10);
+  }
+  ESP_LOGE(TAG, "      *** reset gave up after 5 attempts; chip may be in"
+                " an unresponsive state ***");
 }
 
 bool BresserWeather::cc1101_probe_() {
@@ -528,7 +567,7 @@ void BresserWeather::setup() {
   // ESP_LOGE here only reaches a serial console. We capture all diagnostic
   // results into member fields so the early loop() iterations can re-emit
   // them — that way the user sees them over OTA too.
-  ESP_LOGE(TAG, "=== bresser_weather setup() entry (v0.2.11) ===");
+  ESP_LOGE(TAG, "=== bresser_weather setup() entry (%s) ===", COMPONENT_VERSION);
   ESP_LOGE(TAG, "  pins MOSI=%d MISO=%d CLK=%d CS=%d GDO0=%d GDO2=%d",
            mosi_pin_, miso_pin_, clk_pin_, cs_pin_, gdo0_pin_, gdo2_pin_);
   ESP_LOGE(TAG, "  SPI mode: %s @ %u Hz",
@@ -901,9 +940,10 @@ void BresserWeather::loop() {
     const char *cfg = this->scan_mode_
                           ? PRESETS[this->current_preset_idx_].name
                           : "default";
-    ESP_LOGI(TAG, "Waiting... uptime=%us cfg=%s rx=%u/%u marc=0x%02X "
+    ESP_LOGI(TAG, "[%s] Waiting... uptime=%us cfg=%s rx=%u/%u marc=0x%02X "
                   "rxbytes=%u pktstatus=0x%02X rssi=%ddBm gdo0=%s",
-             now / 1000, cfg, this->valid_packets_, this->total_packets_,
+             COMPONENT_VERSION, now / 1000, cfg,
+             this->valid_packets_, this->total_packets_,
              marc, rxb & 0x7F, pktstatus, rssi_dbm,
              gdo0 ? "HIGH" : "LOW");
     // Persistent boot diagnostic summary — always visible regardless of
@@ -1200,7 +1240,7 @@ void BresserWeather::publish_decoded_(float t, float h, float wkmh, float wdir,
 // dump_config
 // ---------------------------------------------------------------------------
 void BresserWeather::dump_config() {
-  ESP_LOGCONFIG(TAG, "Bresser Weather (CC1101):");
+  ESP_LOGCONFIG(TAG, "Bresser Weather (CC1101) %s:", COMPONENT_VERSION);
   ESP_LOGCONFIG(TAG, "  MOSI=%d MISO=%d CLK=%d CS=%d GDO0=%d GDO2=%d",
                 mosi_pin_, miso_pin_, clk_pin_, cs_pin_, gdo0_pin_, gdo2_pin_);
   ESP_LOGCONFIG(TAG, "  Frequency: %.3f MHz", configured_freq_hz_ / 1e6f);
