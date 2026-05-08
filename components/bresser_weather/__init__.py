@@ -31,6 +31,8 @@ CONF_SCAN_MODE = "scan_mode"
 CONF_SCAN_INTERVAL = "scan_interval"
 CONF_RAW_DUMP_TOPIC = "raw_dump_topic"
 CONF_STATUS_INTERVAL = "status_interval"
+CONF_SPI_MODE = "spi_mode"
+CONF_SPI_CLOCK_HZ = "spi_clock_hz"
 
 bresser_weather_ns = cg.esphome_ns.namespace("bresser_weather")
 BresserWeather = bresser_weather_ns.class_("BresserWeather", cg.Component)
@@ -69,6 +71,10 @@ CONFIG_SCHEMA = cv.Schema(
             CONF_STATUS_INTERVAL, default="10s"
         ): cv.positive_time_period_milliseconds,
         cv.Optional(CONF_RAW_DUMP_TOPIC, default=""): cv.string,
+        cv.Optional(CONF_SPI_MODE, default="bitbang"): cv.one_of(
+            "hardware", "bitbang", lower=True
+        ),
+        cv.Optional(CONF_SPI_CLOCK_HZ, default=4_000_000): cv.positive_int,
     }
 ).extend(cv.COMPONENT_SCHEMA)
 
@@ -93,3 +99,5 @@ async def to_code(config):
     cg.add(var.set_scan_interval_ms(int(config[CONF_SCAN_INTERVAL].total_milliseconds)))
     cg.add(var.set_status_interval_ms(int(config[CONF_STATUS_INTERVAL].total_milliseconds)))
     cg.add(var.set_raw_dump_topic(config[CONF_RAW_DUMP_TOPIC]))
+    cg.add(var.set_bitbang_spi(config[CONF_SPI_MODE] == "bitbang"))
+    cg.add(var.set_spi_clock_hz(config[CONF_SPI_CLOCK_HZ]))

@@ -72,6 +72,8 @@ class BresserWeather : public Component {
   void set_scan_interval_ms(uint32_t v) { scan_interval_ms_ = v; }
   void set_status_interval_ms(uint32_t v) { status_interval_ms_ = v; }
   void set_raw_dump_topic(const std::string &t) { raw_dump_topic_ = t; }
+  void set_bitbang_spi(bool v) { bitbang_spi_ = v; }
+  void set_spi_clock_hz(uint32_t hz) { spi_clock_hz_ = hz; }
 
   void register_sensor(BresserWeatherSensor *s) { sensors_.push_back(s); }
 
@@ -137,9 +139,15 @@ class BresserWeather : public Component {
 
   bool radio_ready_{false};
   SPIClass *spi_{nullptr};
-  // Default 1 MHz — well within CC1101 datasheet limits, far more tolerant
-  // of long jumper wires and breadboard parasitics than 4 MHz.
-  SPISettings spi_settings_{1000000, MSBFIRST, SPI_MODE0};
+  bool bitbang_spi_{true};
+  uint32_t spi_clock_hz_{4000000};
+  uint32_t bitbang_half_period_us_{1};
+  SPISettings spi_settings_{4000000, MSBFIRST, SPI_MODE0};
+
+  // Bit-banged SPI implementation — used when bitbang_spi_ is true.
+  // Bypasses Arduino-ESP32's SPIClass entirely so any GPIO matrix conflict
+  // with another component is irrelevant.
+  uint8_t bitbang_xfer_(uint8_t out);
 
   std::vector<BresserWeatherSensor *> sensors_;
 

@@ -117,6 +117,27 @@ const RadioPreset BresserWeather::PRESETS[BresserWeather::PRESET_COUNT] = {
 void BresserWeather::cc1101_select_() { digitalWrite(this->cs_pin_, LOW); }
 void BresserWeather::cc1101_deselect_() { digitalWrite(this->cs_pin_, HIGH); }
 
+// Software SPI (mode 0, MSB first). One bit per loop iteration:
+//   1. set MOSI to outgoing bit
+//   2. CLK rising edge
+//   3. half-period delay
+//   4. sample MISO
+//   5. CLK falling edge
+//   6. half-period delay
+// At 1 us half-period this gives ~500 kHz, plenty for CC1101.
+uint8_t BresserWeather::bitbang_xfer_(uint8_t out) {
+  uint8_t in = 0;
+  for (int i = 7; i >= 0; --i) {
+    digitalWrite(this->mosi_pin_, (out >> i) & 1 ? HIGH : LOW);
+    digitalWrite(this->clk_pin_, HIGH);
+    if (this->bitbang_half_period_us_) delayMicroseconds(this->bitbang_half_period_us_);
+    in = (in << 1) | (digitalRead(this->miso_pin_) ? 1 : 0);
+    digitalWrite(this->clk_pin_, LOW);
+    if (this->bitbang_half_period_us_) delayMicroseconds(this->bitbang_half_period_us_);
+  }
+  return in;
+}
+
 bool BresserWeather::cc1101_wait_miso_low_() {
   // CC1101 holds CHIP_RDYn (= MISO) high until its crystal stabilises after
   // CS is asserted. Match wmbus driver's 20 ms deadline; if MISO never goes
@@ -131,10 +152,15 @@ bool BresserWeather::cc1101_wait_miso_low_() {
 void BresserWeather::cc1101_write_reg_(uint8_t addr, uint8_t value) {
   this->cc1101_select_();
   this->cc1101_wait_miso_low_();
-  this->spi_->beginTransaction(this->spi_settings_);
-  this->spi_->transfer(addr);
-  this->spi_->transfer(value);
-  this->spi_->endTransaction();
+  if (this->bitbang_spi_) {
+    this->bitbang_xfer_(addr);
+    this->bitbang_xfer_(value);
+  } else {
+    this->spi_->beginTransaction(this->spi_settings_);
+    this->spi_->transfer(addr);
+    this->spi_->transfer(value);
+    this->spi_->endTransaction();
+  }
   this->cc1101_deselect_();
   ESP_LOGV(TAG, "WR 0x%02X = 0x%02X", addr, value);
 }
@@ -154,22 +180,33 @@ bool BresserWeather::cc1101_write_verify_(uint8_t addr, uint8_t value,
 uint8_t BresserWeather::cc1101_read_reg_(uint8_t addr) {
   this->cc1101_select_();
   this->cc1101_wait_miso_low_();
-  this->spi_->beginTransaction(this->spi_settings_);
-  this->spi_->transfer(addr | reg::READ_SINGLE);
-  uint8_t v = this->spi_->transfer(0);
-  this->spi_->endTransaction();
+  uint8_t v;
+  if (this->bitbang_spi_) {
+    this->bitbang_xfer_(addr | reg::READ_SINGLE);
+    v = this->bitbang_xfer_(0);
+  } else {
+    this->spi_->beginTransaction(this->spi_settings_);
+    this->spi_->transfer(addr | reg::READ_SINGLE);
+    v = this->spi_->transfer(0);
+    this->spi_->endTransaction();
+  }
   this->cc1101_deselect_();
   return v;
 }
 
 uint8_t BresserWeather::cc1101_read_status_(uint8_t addr) {
-  // Status registers (0x30..0x3D) MUST use the burst bit per datasheet §10.3.
   this->cc1101_select_();
   this->cc1101_wait_miso_low_();
-  this->spi_->beginTransaction(this->spi_settings_);
-  this->spi_->transfer(addr | reg::READ_BURST);
-  uint8_t v = this->spi_->transfer(0);
-  this->spi_->endTransaction();
+  uint8_t v;
+  if (this->bitbang_spi_) {
+    this->bitbang_xfer_(addr | reg::READ_BURST);
+    v = this->bitbang_xfer_(0);
+  } else {
+    this->spi_->beginTransaction(this->spi_settings_);
+    this->spi_->transfer(addr | reg::READ_BURST);
+    v = this->spi_->transfer(0);
+    this->spi_->endTransaction();
+  }
   this->cc1101_deselect_();
   return v;
 }
@@ -177,9 +214,13 @@ uint8_t BresserWeather::cc1101_read_status_(uint8_t addr) {
 void BresserWeather::cc1101_strobe_(uint8_t cmd) {
   this->cc1101_select_();
   this->cc1101_wait_miso_low_();
-  this->spi_->beginTransaction(this->spi_settings_);
-  this->spi_->transfer(cmd);
-  this->spi_->endTransaction();
+  if (this->bitbang_spi_) {
+    this->bitbang_xfer_(cmd);
+  } else {
+    this->spi_->beginTransaction(this->spi_settings_);
+    this->spi_->transfer(cmd);
+    this->spi_->endTransaction();
+  }
   this->cc1101_deselect_();
 }
 
@@ -187,10 +228,15 @@ void BresserWeather::cc1101_read_burst_(uint8_t addr, uint8_t *buf,
                                         uint8_t len) {
   this->cc1101_select_();
   this->cc1101_wait_miso_low_();
-  this->spi_->beginTransaction(this->spi_settings_);
-  this->spi_->transfer(addr | reg::READ_BURST);
-  for (uint8_t i = 0; i < len; ++i) buf[i] = this->spi_->transfer(0);
-  this->spi_->endTransaction();
+  if (this->bitbang_spi_) {
+    this->bitbang_xfer_(addr | reg::READ_BURST);
+    for (uint8_t i = 0; i < len; ++i) buf[i] = this->bitbang_xfer_(0);
+  } else {
+    this->spi_->beginTransaction(this->spi_settings_);
+    this->spi_->transfer(addr | reg::READ_BURST);
+    for (uint8_t i = 0; i < len; ++i) buf[i] = this->spi_->transfer(0);
+    this->spi_->endTransaction();
+  }
   this->cc1101_deselect_();
 }
 
@@ -198,16 +244,19 @@ void BresserWeather::cc1101_write_burst_(uint8_t addr, const uint8_t *buf,
                                          uint8_t len) {
   this->cc1101_select_();
   this->cc1101_wait_miso_low_();
-  this->spi_->beginTransaction(this->spi_settings_);
-  this->spi_->transfer(addr | reg::WRITE_BURST);
-  for (uint8_t i = 0; i < len; ++i) this->spi_->transfer(buf[i]);
-  this->spi_->endTransaction();
+  if (this->bitbang_spi_) {
+    this->bitbang_xfer_(addr | reg::WRITE_BURST);
+    for (uint8_t i = 0; i < len; ++i) this->bitbang_xfer_(buf[i]);
+  } else {
+    this->spi_->beginTransaction(this->spi_settings_);
+    this->spi_->transfer(addr | reg::WRITE_BURST);
+    for (uint8_t i = 0; i < len; ++i) this->spi_->transfer(buf[i]);
+    this->spi_->endTransaction();
+  }
   this->cc1101_deselect_();
 }
 
-// Manual reset per datasheet §19.1.2. Identical to wmbus_cc1101's version
-// (which works on the user's same hardware), with explicit CS+transaction
-// wrap around the SRES strobe.
+// Manual reset per datasheet §19.1.2.
 void BresserWeather::cc1101_reset_() {
   ESP_LOGE(TAG, "  >>> CC1101 reset: CS dance + SRES strobe");
   digitalWrite(this->cs_pin_, HIGH);
@@ -218,9 +267,14 @@ void BresserWeather::cc1101_reset_() {
   delayMicroseconds(40);
   digitalWrite(this->cs_pin_, LOW);
   bool miso_ok_pre = this->cc1101_wait_miso_low_();
-  this->spi_->beginTransaction(this->spi_settings_);
-  uint8_t reset_status = this->spi_->transfer(reg::SRES);
-  this->spi_->endTransaction();
+  uint8_t reset_status;
+  if (this->bitbang_spi_) {
+    reset_status = this->bitbang_xfer_(reg::SRES);
+  } else {
+    this->spi_->beginTransaction(this->spi_settings_);
+    reset_status = this->spi_->transfer(reg::SRES);
+    this->spi_->endTransaction();
+  }
   bool miso_ok_post = this->cc1101_wait_miso_low_();
   digitalWrite(this->cs_pin_, HIGH);
   delay(10);
@@ -465,42 +519,70 @@ void BresserWeather::setup() {
   // ESP_LOGE here only reaches a serial console. We capture all diagnostic
   // results into member fields so the early loop() iterations can re-emit
   // them — that way the user sees them over OTA too.
-  ESP_LOGE(TAG, "=== bresser_weather setup() entry (v0.2.3) ===");
+  ESP_LOGE(TAG, "=== bresser_weather setup() entry (v0.2.4) ===");
   ESP_LOGE(TAG, "  pins MOSI=%d MISO=%d CLK=%d CS=%d GDO0=%d GDO2=%d",
            mosi_pin_, miso_pin_, clk_pin_, cs_pin_, gdo0_pin_, gdo2_pin_);
+  ESP_LOGE(TAG, "  SPI mode: %s @ %u Hz",
+           this->bitbang_spi_ ? "BIT-BANG (software)" : "HARDWARE (Arduino SPI)",
+           (unsigned) this->spi_clock_hz_);
 
-  // GPIO config — match wmbus_cc1101 exactly: plain INPUT on MISO (no pull-up).
-  // Arduino-ESP32 SPI.begin() will overwrite MISO mode anyway.
+  // GPIO config. In bit-bang mode we own MOSI/CLK as outputs and MISO as
+  // input; in hardware mode the Arduino SPI.begin() owns them.
   pinMode(this->cs_pin_, OUTPUT);
   digitalWrite(this->cs_pin_, HIGH);
-  pinMode(this->miso_pin_, INPUT);
   pinMode(this->gdo0_pin_, INPUT);
   if (this->gdo2_pin_ >= 0) pinMode(this->gdo2_pin_, INPUT);
+
+  if (this->bitbang_spi_) {
+    pinMode(this->mosi_pin_, OUTPUT);
+    digitalWrite(this->mosi_pin_, LOW);
+    pinMode(this->clk_pin_, OUTPUT);
+    digitalWrite(this->clk_pin_, LOW);
+    pinMode(this->miso_pin_, INPUT);
+    // Compute half-period from configured clock rate. Cap at 100 kHz
+    // (=5 us half-period) for absolute reliability.
+    uint32_t hz = this->spi_clock_hz_;
+    if (hz < 50000) hz = 50000;
+    if (hz > 4000000) hz = 4000000;
+    uint32_t half_period_us = 500000UL / hz;  // half of (1/hz) seconds in us
+    if (half_period_us == 0) half_period_us = 1;
+    this->bitbang_half_period_us_ = half_period_us;
+    ESP_LOGE(TAG, "  bit-bang half-period: %u us (≈%u Hz)",
+             (unsigned) half_period_us,
+             (unsigned) (500000UL / half_period_us));
+  } else {
+    pinMode(this->miso_pin_, INPUT);
+  }
 
   this->diag_miso_pre_spi_high_ = digitalRead(this->miso_pin_) == HIGH;
   ESP_LOGE(TAG, "  pre-SPI MISO digital read=%s",
            this->diag_miso_pre_spi_high_ ? "HIGH" : "LOW");
 
-  // Default-construct SPIClass so Arduino-ESP32 3.x picks the SoC's right
-  // peripheral (VSPI on classic, FSPI on S2/S3/C3).
-  ESP_LOGE(TAG, "  creating SPIClass and calling begin() at 1 MHz SPI clock...");
-  this->spi_ = new SPIClass();
-  this->spi_->begin(this->clk_pin_, this->miso_pin_, this->mosi_pin_,
-                    this->cs_pin_);
-  // Explicitly disable hardware CS — we drive it manually like wmbus_cc1101.
-  this->spi_->setHwCs(false);
-  delay(10);
+  if (!this->bitbang_spi_) {
+    ESP_LOGE(TAG, "  creating SPIClass and calling begin() at %u Hz...",
+             (unsigned) this->spi_clock_hz_);
+    this->spi_settings_ = SPISettings(this->spi_clock_hz_, MSBFIRST, SPI_MODE0);
+    this->spi_ = new SPIClass();
+    this->spi_->begin(this->clk_pin_, this->miso_pin_, this->mosi_pin_,
+                      this->cs_pin_);
+    this->spi_->setHwCs(false);
+    delay(10);
+  }
   this->diag_miso_post_spi_high_ = digitalRead(this->miso_pin_) == HIGH;
-  ESP_LOGE(TAG, "  SPI bus up; post-begin MISO=%s, CS pin reads=%s",
+  ESP_LOGE(TAG, "  SPI ready; post-begin MISO=%s, CS pin reads=%s",
            this->diag_miso_post_spi_high_ ? "HIGH" : "LOW",
            digitalRead(this->cs_pin_) ? "HIGH" : "LOW");
 
   // ---- SNOP loopback ----
   this->cc1101_select_();
   this->diag_miso_after_cs_low_ = this->cc1101_wait_miso_low_();
-  this->spi_->beginTransaction(this->spi_settings_);
-  this->diag_snop_status_ = this->spi_->transfer(0x3D);
-  this->spi_->endTransaction();
+  if (this->bitbang_spi_) {
+    this->diag_snop_status_ = this->bitbang_xfer_(0x3D);
+  } else {
+    this->spi_->beginTransaction(this->spi_settings_);
+    this->diag_snop_status_ = this->spi_->transfer(0x3D);
+    this->spi_->endTransaction();
+  }
   this->cc1101_deselect_();
   ESP_LOGE(TAG, "  SNOP: after CS LOW miso=%s, status byte=0x%02X",
            this->diag_miso_after_cs_low_ ? "LOW(ready)" : "HIGH/timeout",
@@ -925,6 +1007,9 @@ void BresserWeather::dump_config() {
   ESP_LOGCONFIG(TAG, "  MOSI=%d MISO=%d CLK=%d CS=%d GDO0=%d GDO2=%d",
                 mosi_pin_, miso_pin_, clk_pin_, cs_pin_, gdo0_pin_, gdo2_pin_);
   ESP_LOGCONFIG(TAG, "  Frequency: %.3f MHz", configured_freq_hz_ / 1e6f);
+  ESP_LOGCONFIG(TAG, "  SPI mode: %s @ %u Hz",
+                bitbang_spi_ ? "bit-bang" : "hardware",
+                (unsigned) spi_clock_hz_);
   ESP_LOGCONFIG(TAG, "  Log unknown frames: %s", YESNO(log_unknown_));
   ESP_LOGCONFIG(TAG, "  Scan mode: %s (interval=%u ms)", YESNO(scan_mode_),
                 (unsigned) scan_interval_ms_);
