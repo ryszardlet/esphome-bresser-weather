@@ -6,11 +6,23 @@
 
 #include <SPI.h>
 #include <vector>
+#include <string>
 
 namespace esphome {
 namespace bresser_weather {
 
 class BresserWeather;
+
+struct RadioPreset {
+  const char *name;
+  uint32_t freq_hz;
+  float bitrate_kbps;
+  float deviation_khz;
+  float rxbw_khz;
+  bool sync_enabled;
+  uint16_t sync_word;
+  uint8_t pkt_len;
+};
 
 class BresserWeatherSensor : public Component {
  public:
@@ -39,12 +51,6 @@ class BresserWeatherSensor : public Component {
   sensor::Sensor *rssi_{nullptr};
 };
 
-struct BresserFrame {
-  uint8_t data[27];
-  uint8_t length;
-  int16_t rssi_dbm;
-};
-
 class BresserWeather : public Component {
  public:
   void setup() override;
@@ -60,37 +66,61 @@ class BresserWeather : public Component {
     gdo0_pin_ = gdo0;
     gdo2_pin_ = gdo2;
   }
-  void set_frequency_hz(uint32_t hz) { frequency_hz_ = hz; }
+  void set_frequency_hz(uint32_t hz) { configured_freq_hz_ = hz; }
   void set_log_unknown(bool v) { log_unknown_ = v; }
+  void set_scan_mode(bool v) { scan_mode_ = v; }
+  void set_scan_interval_ms(uint32_t v) { scan_interval_ms_ = v; }
+  void set_status_interval_ms(uint32_t v) { status_interval_ms_ = v; }
+  void set_raw_dump_topic(const std::string &t) { raw_dump_topic_ = t; }
 
   void register_sensor(BresserWeatherSensor *s) { sensors_.push_back(s); }
 
+  static constexpr size_t PRESET_COUNT = 8;
+  static const RadioPreset PRESETS[PRESET_COUNT];
+
  protected:
+  // ---- SPI / CC1101 low-level ----
   void cc1101_select_();
   void cc1101_deselect_();
   bool cc1101_wait_miso_low_();
   void cc1101_write_reg_(uint8_t addr, uint8_t value);
+  bool cc1101_write_verify_(uint8_t addr, uint8_t value, const char *name);
   uint8_t cc1101_read_reg_(uint8_t addr);
   uint8_t cc1101_read_status_(uint8_t addr);
   void cc1101_strobe_(uint8_t cmd);
   void cc1101_read_burst_(uint8_t addr, uint8_t *buf, uint8_t len);
   void cc1101_write_burst_(uint8_t addr, const uint8_t *buf, uint8_t len);
   void cc1101_reset_();
-  bool cc1101_init_();
-  void cc1101_program_freq_(uint32_t hz);
+  bool cc1101_probe_();
   void cc1101_enter_rx_();
   void cc1101_flush_rx_();
 
-  bool process_frame_(const BresserFrame &frame);
-  bool decode_bresser_7in1_(uint8_t *msg, uint8_t length, int16_t rssi_dbm);
-  void publish_(float temperature, float humidity, float wind_speed_kmh,
-                float wind_dir_deg, float rain_mm, float uv_index,
-                float light_lux, float pressure_hpa, int16_t rssi_dbm);
+  // ---- High-level radio config ----
+  void apply_preset_(const RadioPreset &p);
+  void log_register_dump_();
+
+  static void calc_drate_(float kbps, uint8_t &drate_e, uint8_t &drate_m);
+  static void calc_dev_(float khz, uint8_t &dev_e, uint8_t &dev_m);
+  static uint8_t calc_chanbw_(float khz);
+
+  // ---- Frame handling ----
+  void handle_frame_(uint8_t *raw, uint8_t length, int16_t rssi_dbm);
+  bool decode_bresser_7in1_(const uint8_t *raw, uint8_t length,
+                            int16_t rssi_dbm, bool from_scan);
+  void log_packet_diff_(const uint8_t *raw, uint8_t length);
+  void publish_raw_(const uint8_t *raw, uint8_t length, int16_t rssi_dbm,
+                    int sync_offset_bit);
+  void publish_decoded_(float t, float h, float wkmh, float wdir,
+                        float rmm, float uv, float lux, float p,
+                        int16_t rssi_dbm);
 
   static int16_t rssi_raw_to_dbm_(uint8_t raw);
   static uint16_t lfsr_digest16_(const uint8_t *message, unsigned bytes,
                                  uint16_t gen, uint16_t key);
+  static int find_sync_bit_(const uint8_t *raw, uint8_t length,
+                            uint16_t sync_word);
 
+  // ---- State ----
   int mosi_pin_{-1};
   int miso_pin_{-1};
   int clk_pin_{-1};
@@ -98,15 +128,28 @@ class BresserWeather : public Component {
   int gdo0_pin_{-1};
   int gdo2_pin_{-1};
 
-  uint32_t frequency_hz_{868300000};
-  bool log_unknown_{false};
-  bool radio_ready_{false};
+  uint32_t configured_freq_hz_{868300000};
+  bool log_unknown_{true};
+  bool scan_mode_{false};
+  uint32_t scan_interval_ms_{30000};
+  uint32_t status_interval_ms_{10000};
+  std::string raw_dump_topic_{""};
 
+  bool radio_ready_{false};
   SPIClass *spi_{nullptr};
   SPISettings spi_settings_{4000000, MSBFIRST, SPI_MODE0};
 
   std::vector<BresserWeatherSensor *> sensors_;
+
+  size_t current_preset_idx_{0};
+  uint32_t scan_started_ms_{0};
+  uint32_t total_packets_{0};
+  uint32_t valid_packets_{0};
   uint32_t last_packet_ms_{0};
+  uint32_t last_status_log_ms_{0};
+
+  uint8_t prev_payload_[64]{};
+  uint8_t prev_payload_len_{0};
 };
 
 }  // namespace bresser_weather

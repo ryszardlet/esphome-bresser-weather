@@ -3,91 +3,110 @@
 #include "esphome/core/log.h"
 #include "esphome/core/hal.h"
 
+#ifdef USE_MQTT
+#include "esphome/components/mqtt/mqtt_client.h"
+#endif
+
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <cstring>
+
 namespace esphome {
 namespace bresser_weather {
 
 static const char *const TAG = "bresser_weather";
 
 // ---------------------------------------------------------------------------
-// CC1101 register addresses (subset used by the driver)
+// CC1101 register addresses
 // ---------------------------------------------------------------------------
-static constexpr uint8_t CC1101_IOCFG2 = 0x00;
-static constexpr uint8_t CC1101_IOCFG0 = 0x02;
-static constexpr uint8_t CC1101_FIFOTHR = 0x03;
-static constexpr uint8_t CC1101_SYNC1 = 0x04;
-static constexpr uint8_t CC1101_SYNC0 = 0x05;
-static constexpr uint8_t CC1101_PKTLEN = 0x06;
-static constexpr uint8_t CC1101_PKTCTRL1 = 0x07;
-static constexpr uint8_t CC1101_PKTCTRL0 = 0x08;
-static constexpr uint8_t CC1101_CHANNR = 0x0A;
-static constexpr uint8_t CC1101_FSCTRL1 = 0x0B;
-static constexpr uint8_t CC1101_FSCTRL0 = 0x0C;
-static constexpr uint8_t CC1101_FREQ2 = 0x0D;
-static constexpr uint8_t CC1101_FREQ1 = 0x0E;
-static constexpr uint8_t CC1101_FREQ0 = 0x0F;
-static constexpr uint8_t CC1101_MDMCFG4 = 0x10;
-static constexpr uint8_t CC1101_MDMCFG3 = 0x11;
-static constexpr uint8_t CC1101_MDMCFG2 = 0x12;
-static constexpr uint8_t CC1101_MDMCFG1 = 0x13;
-static constexpr uint8_t CC1101_MDMCFG0 = 0x14;
-static constexpr uint8_t CC1101_DEVIATN = 0x15;
-static constexpr uint8_t CC1101_MCSM2 = 0x16;
-static constexpr uint8_t CC1101_MCSM1 = 0x17;
-static constexpr uint8_t CC1101_MCSM0 = 0x18;
-static constexpr uint8_t CC1101_FOCCFG = 0x19;
-static constexpr uint8_t CC1101_BSCFG = 0x1A;
-static constexpr uint8_t CC1101_AGCCTRL2 = 0x1B;
-static constexpr uint8_t CC1101_AGCCTRL1 = 0x1C;
-static constexpr uint8_t CC1101_AGCCTRL0 = 0x1D;
-static constexpr uint8_t CC1101_FREND1 = 0x21;
-static constexpr uint8_t CC1101_FREND0 = 0x22;
-static constexpr uint8_t CC1101_FSCAL3 = 0x23;
-static constexpr uint8_t CC1101_FSCAL2 = 0x24;
-static constexpr uint8_t CC1101_FSCAL1 = 0x25;
-static constexpr uint8_t CC1101_FSCAL0 = 0x26;
-static constexpr uint8_t CC1101_TEST2 = 0x2C;
-static constexpr uint8_t CC1101_TEST1 = 0x2D;
-static constexpr uint8_t CC1101_TEST0 = 0x2E;
-static constexpr uint8_t CC1101_PARTNUM = 0x30;
-static constexpr uint8_t CC1101_VERSION = 0x31;
-static constexpr uint8_t CC1101_RSSI = 0x34;
-static constexpr uint8_t CC1101_MARCSTATE = 0x35;
-static constexpr uint8_t CC1101_PKTSTATUS = 0x38;
-static constexpr uint8_t CC1101_RXBYTES = 0x3B;
+namespace reg {
+constexpr uint8_t IOCFG2 = 0x00;
+constexpr uint8_t IOCFG0 = 0x02;
+constexpr uint8_t FIFOTHR = 0x03;
+constexpr uint8_t SYNC1 = 0x04;
+constexpr uint8_t SYNC0 = 0x05;
+constexpr uint8_t PKTLEN = 0x06;
+constexpr uint8_t PKTCTRL1 = 0x07;
+constexpr uint8_t PKTCTRL0 = 0x08;
+constexpr uint8_t CHANNR = 0x0A;
+constexpr uint8_t FSCTRL1 = 0x0B;
+constexpr uint8_t FSCTRL0 = 0x0C;
+constexpr uint8_t FREQ2 = 0x0D;
+constexpr uint8_t FREQ1 = 0x0E;
+constexpr uint8_t FREQ0 = 0x0F;
+constexpr uint8_t MDMCFG4 = 0x10;
+constexpr uint8_t MDMCFG3 = 0x11;
+constexpr uint8_t MDMCFG2 = 0x12;
+constexpr uint8_t MDMCFG1 = 0x13;
+constexpr uint8_t MDMCFG0 = 0x14;
+constexpr uint8_t DEVIATN = 0x15;
+constexpr uint8_t MCSM2 = 0x16;
+constexpr uint8_t MCSM1 = 0x17;
+constexpr uint8_t MCSM0 = 0x18;
+constexpr uint8_t FOCCFG = 0x19;
+constexpr uint8_t BSCFG = 0x1A;
+constexpr uint8_t AGCCTRL2 = 0x1B;
+constexpr uint8_t AGCCTRL1 = 0x1C;
+constexpr uint8_t AGCCTRL0 = 0x1D;
+constexpr uint8_t FREND1 = 0x21;
+constexpr uint8_t FREND0 = 0x22;
+constexpr uint8_t FSCAL3 = 0x23;
+constexpr uint8_t FSCAL2 = 0x24;
+constexpr uint8_t FSCAL1 = 0x25;
+constexpr uint8_t FSCAL0 = 0x26;
+constexpr uint8_t TEST2 = 0x2C;
+constexpr uint8_t TEST1 = 0x2D;
+constexpr uint8_t TEST0 = 0x2E;
+constexpr uint8_t PARTNUM = 0x30;
+constexpr uint8_t VERSION = 0x31;
+constexpr uint8_t RSSI = 0x34;
+constexpr uint8_t MARCSTATE = 0x35;
+constexpr uint8_t PKTSTATUS = 0x38;
+constexpr uint8_t RXBYTES = 0x3B;
+constexpr uint8_t PATABLE = 0x3E;
+constexpr uint8_t FIFO = 0x3F;
 
-static constexpr uint8_t CC1101_PATABLE = 0x3E;
-static constexpr uint8_t CC1101_TXFIFO = 0x3F;
-static constexpr uint8_t CC1101_RXFIFO = 0x3F;
+constexpr uint8_t SRES = 0x30;
+constexpr uint8_t SCAL = 0x33;
+constexpr uint8_t SRX = 0x34;
+constexpr uint8_t SIDLE = 0x36;
+constexpr uint8_t SFRX = 0x3A;
 
-// Strobes
-static constexpr uint8_t CC1101_SRES = 0x30;
-static constexpr uint8_t CC1101_SCAL = 0x33;
-static constexpr uint8_t CC1101_SRX = 0x34;
-static constexpr uint8_t CC1101_SIDLE = 0x36;
-static constexpr uint8_t CC1101_SFRX = 0x3A;
-static constexpr uint8_t CC1101_SNOP = 0x3D;
+constexpr uint8_t READ_SINGLE = 0x80;
+constexpr uint8_t READ_BURST = 0xC0;
+constexpr uint8_t WRITE_BURST = 0x40;
+}  // namespace reg
 
-// Header bits
-static constexpr uint8_t CC1101_READ_SINGLE = 0x80;
-static constexpr uint8_t CC1101_READ_BURST = 0xC0;
-static constexpr uint8_t CC1101_WRITE_BURST = 0x40;
-
-// Bresser 7-in-1 packet length (bytes after sync word)
-static constexpr uint8_t BRESSER_PAYLOAD_LEN = 26;
+static constexpr uint32_t CC1101_XTAL_HZ = 26000000UL;
 
 // ---------------------------------------------------------------------------
-// SPI low-level helpers
+// Radio presets used in scan mode. Index 0 is also the default profile when
+// scan_mode is disabled.
+//
+// CC1101 only fills the RX FIFO after sync detection, so even the "fuzz"
+// presets enable sync — they just use 0xAAAA which matches the preamble
+// bytes the sensor sends. find_sync_bit_() then locates the real sync
+// inside the captured bytes.
 // ---------------------------------------------------------------------------
-void BresserWeather::cc1101_select_() {
-  digitalWrite(this->cs_pin_, LOW);
-}
+const RadioPreset BresserWeather::PRESETS[BresserWeather::PRESET_COUNT] = {
+    {"A_canonical",   868300000,  8.21f,  57.136f, 270.0f, true, 0x2DD4, 26},
+    {"B_aa_preamble", 868300000,  8.21f,  57.136f, 270.0f, true, 0xAAAA, 64},
+    {"C_17_2kbps",    868300000, 17.241f, 40.0f,   203.0f, true, 0x2DD4, 26},
+    {"D_18_8kbps",    868300000, 18.868f, 40.0f,   203.0f, true, 0x2DD4, 26},
+    {"E_aa2d_sync",   868300000,  8.21f,  57.136f, 270.0f, true, 0xAA2D, 27},
+    {"F_868_35MHz",   868350000,  8.21f,  57.136f, 270.0f, true, 0x2DD4, 26},
+    {"G_4_8kbps_aa",  868300000,  4.8f,    9.6f,    58.0f, true, 0xAAAA, 64},
+    {"H_9_6kbps_aa",  868300000,  9.6f,   40.0f,   203.0f, true, 0xAAAA, 64},
+};
 
-void BresserWeather::cc1101_deselect_() {
-  digitalWrite(this->cs_pin_, HIGH);
-}
+// ---------------------------------------------------------------------------
+// SPI plumbing
+// ---------------------------------------------------------------------------
+void BresserWeather::cc1101_select_() { digitalWrite(this->cs_pin_, LOW); }
+void BresserWeather::cc1101_deselect_() { digitalWrite(this->cs_pin_, HIGH); }
 
 bool BresserWeather::cc1101_wait_miso_low_() {
-  // CC1101 holds MISO high until the crystal is stable after CS goes low.
   uint32_t start = micros();
   while (digitalRead(this->miso_pin_) == HIGH) {
     if ((uint32_t) (micros() - start) > 5000) {
@@ -105,13 +124,26 @@ void BresserWeather::cc1101_write_reg_(uint8_t addr, uint8_t value) {
   this->spi_->transfer(value);
   this->cc1101_deselect_();
   this->spi_->endTransaction();
+  ESP_LOGV(TAG, "WR 0x%02X = 0x%02X", addr, value);
+}
+
+bool BresserWeather::cc1101_write_verify_(uint8_t addr, uint8_t value,
+                                          const char *name) {
+  this->cc1101_write_reg_(addr, value);
+  uint8_t got = this->cc1101_read_reg_(addr);
+  if (got != value) {
+    ESP_LOGE(TAG, "Register %s (0x%02X) write failed: wrote 0x%02X read 0x%02X",
+             name, addr, value, got);
+    return false;
+  }
+  return true;
 }
 
 uint8_t BresserWeather::cc1101_read_reg_(uint8_t addr) {
   this->spi_->beginTransaction(this->spi_settings_);
   this->cc1101_select_();
   this->cc1101_wait_miso_low_();
-  this->spi_->transfer(addr | CC1101_READ_SINGLE);
+  this->spi_->transfer(addr | reg::READ_SINGLE);
   uint8_t v = this->spi_->transfer(0);
   this->cc1101_deselect_();
   this->spi_->endTransaction();
@@ -119,11 +151,10 @@ uint8_t BresserWeather::cc1101_read_reg_(uint8_t addr) {
 }
 
 uint8_t BresserWeather::cc1101_read_status_(uint8_t addr) {
-  // Status registers (0x30..0x3D) require burst-read bit set.
   this->spi_->beginTransaction(this->spi_settings_);
   this->cc1101_select_();
   this->cc1101_wait_miso_low_();
-  this->spi_->transfer(addr | CC1101_READ_BURST);
+  this->spi_->transfer(addr | reg::READ_BURST);
   uint8_t v = this->spi_->transfer(0);
   this->cc1101_deselect_();
   this->spi_->endTransaction();
@@ -139,257 +170,536 @@ void BresserWeather::cc1101_strobe_(uint8_t cmd) {
   this->spi_->endTransaction();
 }
 
-void BresserWeather::cc1101_read_burst_(uint8_t addr, uint8_t *buf, uint8_t len) {
+void BresserWeather::cc1101_read_burst_(uint8_t addr, uint8_t *buf,
+                                        uint8_t len) {
   this->spi_->beginTransaction(this->spi_settings_);
   this->cc1101_select_();
   this->cc1101_wait_miso_low_();
-  this->spi_->transfer(addr | CC1101_READ_BURST);
-  for (uint8_t i = 0; i < len; ++i) {
-    buf[i] = this->spi_->transfer(0);
-  }
+  this->spi_->transfer(addr | reg::READ_BURST);
+  for (uint8_t i = 0; i < len; ++i) buf[i] = this->spi_->transfer(0);
   this->cc1101_deselect_();
   this->spi_->endTransaction();
 }
 
-void BresserWeather::cc1101_write_burst_(uint8_t addr, const uint8_t *buf, uint8_t len) {
+void BresserWeather::cc1101_write_burst_(uint8_t addr, const uint8_t *buf,
+                                         uint8_t len) {
   this->spi_->beginTransaction(this->spi_settings_);
   this->cc1101_select_();
   this->cc1101_wait_miso_low_();
-  this->spi_->transfer(addr | CC1101_WRITE_BURST);
-  for (uint8_t i = 0; i < len; ++i) {
-    this->spi_->transfer(buf[i]);
-  }
+  this->spi_->transfer(addr | reg::WRITE_BURST);
+  for (uint8_t i = 0; i < len; ++i) this->spi_->transfer(buf[i]);
   this->cc1101_deselect_();
   this->spi_->endTransaction();
 }
 
 void BresserWeather::cc1101_reset_() {
-  // Manual SRES with the timing required by the datasheet.
   digitalWrite(this->cs_pin_, HIGH);
   delayMicroseconds(5);
   digitalWrite(this->cs_pin_, LOW);
   delayMicroseconds(5);
   digitalWrite(this->cs_pin_, HIGH);
   delayMicroseconds(45);
-  this->cc1101_strobe_(CC1101_SRES);
+  this->cc1101_strobe_(reg::SRES);
   delay(2);
 }
 
-void BresserWeather::cc1101_program_freq_(uint32_t hz) {
-  // FREQ = hz * 2^16 / 26 MHz, rounded.
-  uint64_t freq_word = ((uint64_t) hz << 16) / 26000000ULL;
-  uint8_t f2 = (freq_word >> 16) & 0xFF;
-  uint8_t f1 = (freq_word >> 8) & 0xFF;
-  uint8_t f0 = freq_word & 0xFF;
-  this->cc1101_write_reg_(CC1101_FREQ2, f2);
-  this->cc1101_write_reg_(CC1101_FREQ1, f1);
-  this->cc1101_write_reg_(CC1101_FREQ0, f0);
-  ESP_LOGD(TAG, "FREQ programmed: %u Hz -> %02X %02X %02X", hz, f2, f1, f0);
-}
-
-bool BresserWeather::cc1101_init_() {
-  this->cc1101_reset_();
-
-  uint8_t part = this->cc1101_read_status_(CC1101_PARTNUM);
-  uint8_t version = this->cc1101_read_status_(CC1101_VERSION);
+bool BresserWeather::cc1101_probe_() {
+  uint8_t part = this->cc1101_read_status_(reg::PARTNUM);
+  uint8_t version = this->cc1101_read_status_(reg::VERSION);
   ESP_LOGI(TAG, "CC1101 PARTNUM=0x%02X VERSION=0x%02X", part, version);
-  if (version == 0x00 || version == 0xFF) {
-    ESP_LOGE(TAG, "CC1101 not detected on SPI bus");
+  if (part != 0x00) {
+    ESP_LOGE(TAG, "CC1101 PARTNUM unexpected (0x%02X) - check SPI wiring", part);
     return false;
   }
-
-  // GDO2: asserts on sync detect, deasserts at end of packet (IOCFG=0x06).
-  this->cc1101_write_reg_(CC1101_IOCFG2, 0x06);
-  // GDO0: same (we drive both interrupt and status read off it).
-  this->cc1101_write_reg_(CC1101_IOCFG0, 0x06);
-  // RX FIFO threshold = 33 bytes (full-payload trigger after sync).
-  this->cc1101_write_reg_(CC1101_FIFOTHR, 0x47);
-
-  // Sync word 0x2DD4 (Fine Offset / Bresser).
-  this->cc1101_write_reg_(CC1101_SYNC1, 0x2D);
-  this->cc1101_write_reg_(CC1101_SYNC0, 0xD4);
-
-  // Fixed packet length: 26 payload bytes captured after sync.
-  this->cc1101_write_reg_(CC1101_PKTLEN, BRESSER_PAYLOAD_LEN);
-  // No address check, no auto-flush, no status appended.
-  this->cc1101_write_reg_(CC1101_PKTCTRL1, 0x00);
-  // Fixed length, no whitening, no CRC by hardware (we validate ourselves).
-  this->cc1101_write_reg_(CC1101_PKTCTRL0, 0x00);
-  this->cc1101_write_reg_(CC1101_CHANNR, 0x00);
-
-  // IF = 152 kHz @ 26 MHz xtal.
-  this->cc1101_write_reg_(CC1101_FSCTRL1, 0x06);
-  this->cc1101_write_reg_(CC1101_FSCTRL0, 0x00);
-
-  // Frequency programmed from configuration.
-  this->cc1101_program_freq_(this->frequency_hz_);
-
-  // Modem: CHANBW=270 kHz (CHANBW_E=1, CHANBW_M=2), DRATE_E=9.
-  // DRATE_M = 124 -> 18.868 kbps, the rate Bresser 7-in-1 actually uses.
-  this->cc1101_write_reg_(CC1101_MDMCFG4, 0x69);
-  this->cc1101_write_reg_(CC1101_MDMCFG3, 0x7C);
-  // 2-FSK, no Manchester, 16/16 sync word.
-  this->cc1101_write_reg_(CC1101_MDMCFG2, 0x03);
-  // 4 preamble bytes, default channel spacing exponent.
-  this->cc1101_write_reg_(CC1101_MDMCFG1, 0x22);
-  this->cc1101_write_reg_(CC1101_MDMCFG0, 0xF8);
-  // Deviation ~41 kHz (DEV_E=4, DEV_M=5) -> close to the spec'd 40 kHz.
-  this->cc1101_write_reg_(CC1101_DEVIATN, 0x45);
-
-  // MCSM: stay in RX after a packet, auto-cal on IDLE->RX.
-  this->cc1101_write_reg_(CC1101_MCSM2, 0x07);
-  this->cc1101_write_reg_(CC1101_MCSM1, 0x3F);
-  this->cc1101_write_reg_(CC1101_MCSM0, 0x18);
-
-  // Frequency offset compensation (TI recommended for low data rates).
-  this->cc1101_write_reg_(CC1101_FOCCFG, 0x16);
-  this->cc1101_write_reg_(CC1101_BSCFG, 0x6C);
-  // AGC tuned for low-rate FSK reception.
-  this->cc1101_write_reg_(CC1101_AGCCTRL2, 0x43);
-  this->cc1101_write_reg_(CC1101_AGCCTRL1, 0x40);
-  this->cc1101_write_reg_(CC1101_AGCCTRL0, 0x91);
-
-  this->cc1101_write_reg_(CC1101_FREND1, 0x56);
-  this->cc1101_write_reg_(CC1101_FREND0, 0x10);
-  this->cc1101_write_reg_(CC1101_FSCAL3, 0xE9);
-  this->cc1101_write_reg_(CC1101_FSCAL2, 0x2A);
-  this->cc1101_write_reg_(CC1101_FSCAL1, 0x00);
-  this->cc1101_write_reg_(CC1101_FSCAL0, 0x1F);
-  this->cc1101_write_reg_(CC1101_TEST2, 0x81);
-  this->cc1101_write_reg_(CC1101_TEST1, 0x35);
-  this->cc1101_write_reg_(CC1101_TEST0, 0x09);
-
-  // Receive-only profile - PATABLE not strictly required.
-  uint8_t patable[] = {0xC0};
-  this->cc1101_write_burst_(CC1101_PATABLE, patable, sizeof(patable));
-
+  if (version == 0x00 || version == 0xFF) {
+    ESP_LOGE(TAG, "CC1101 VERSION 0x%02X - chip not responding (check power, MISO, CS)",
+             version);
+    return false;
+  }
+  if (version != 0x04 && version != 0x14) {
+    ESP_LOGW(TAG, "CC1101 VERSION 0x%02X is unusual - expected 0x04 or 0x14, continuing anyway",
+             version);
+  }
   return true;
 }
 
 void BresserWeather::cc1101_flush_rx_() {
-  this->cc1101_strobe_(CC1101_SIDLE);
+  this->cc1101_strobe_(reg::SIDLE);
   delayMicroseconds(100);
-  this->cc1101_strobe_(CC1101_SFRX);
+  this->cc1101_strobe_(reg::SFRX);
   delayMicroseconds(100);
 }
 
 void BresserWeather::cc1101_enter_rx_() {
   this->cc1101_flush_rx_();
-  this->cc1101_strobe_(CC1101_SRX);
+  this->cc1101_strobe_(reg::SRX);
+}
+
+// ---------------------------------------------------------------------------
+// Modulation register math
+// ---------------------------------------------------------------------------
+void BresserWeather::calc_drate_(float kbps, uint8_t &drate_e, uint8_t &drate_m) {
+  // bitrate = (256 + DRATE_M) * 2^DRATE_E * Fxosc / 2^28
+  double target = (double) kbps * 1000.0 * (double) (1ULL << 28) /
+                  (double) CC1101_XTAL_HZ;
+  for (int e = 15; e >= 0; --e) {
+    double base = (double) (1ULL << e);
+    double m = (target / base) - 256.0;
+    if (m >= 0.0 && m <= 255.0) {
+      drate_e = (uint8_t) e;
+      drate_m = (uint8_t) std::lround(m);
+      return;
+    }
+  }
+  drate_e = 0;
+  drate_m = 0;
+}
+
+void BresserWeather::calc_dev_(float khz, uint8_t &dev_e, uint8_t &dev_m) {
+  // f_dev = Fxosc / 2^17 * (8 + DEV_M) * 2^DEV_E
+  double target = (double) khz * 1000.0 * (double) (1ULL << 17) /
+                  (double) CC1101_XTAL_HZ;
+  double best_err = 1e9;
+  uint8_t best_e = 0, best_m = 0;
+  for (int e = 0; e < 8; ++e) {
+    for (int m = 0; m < 8; ++m) {
+      double v = (double) (8 + m) * (double) (1ULL << e);
+      double err = std::abs(v - target);
+      if (err < best_err) {
+        best_err = err;
+        best_e = (uint8_t) e;
+        best_m = (uint8_t) m;
+      }
+    }
+  }
+  dev_e = best_e;
+  dev_m = best_m;
+}
+
+uint8_t BresserWeather::calc_chanbw_(float khz) {
+  // BW = Fxosc / (8 * (4+CHANBW_M) * 2^CHANBW_E)
+  double target = (double) CC1101_XTAL_HZ / (8.0 * (double) khz * 1000.0);
+  double best_err = 1e9;
+  uint8_t best_e = 0, best_m = 0;
+  for (int e = 0; e < 4; ++e) {
+    for (int m = 0; m < 4; ++m) {
+      double v = (double) (4 + m) * (double) (1ULL << e);
+      double err = std::abs(v - target);
+      if (err < best_err) {
+        best_err = err;
+        best_e = (uint8_t) e;
+        best_m = (uint8_t) m;
+      }
+    }
+  }
+  return (uint8_t) ((best_e << 6) | (best_m << 4));
+}
+
+// ---------------------------------------------------------------------------
+// Apply a high-level RadioPreset to the chip
+// ---------------------------------------------------------------------------
+void BresserWeather::apply_preset_(const RadioPreset &p) {
+  ESP_LOGI(TAG, "==> Applying preset '%s': freq=%.3fMHz br=%.3fkbps dev=%.1fkHz "
+                "bw=%.0fkHz sync=%s pkt=%u",
+           p.name, p.freq_hz / 1e6f, p.bitrate_kbps, p.deviation_khz,
+           p.rxbw_khz, p.sync_enabled ? "ON" : "OFF", p.pkt_len);
+
+  this->cc1101_strobe_(reg::SIDLE);
+  delayMicroseconds(200);
+
+  // GDO2: assert on sync detect, deassert at end of packet (or after
+  //       fixed-length burst when sync is disabled).
+  this->cc1101_write_verify_(reg::IOCFG2, 0x06, "IOCFG2");
+  this->cc1101_write_verify_(reg::IOCFG0, 0x06, "IOCFG0");
+  this->cc1101_write_verify_(reg::FIFOTHR, 0x47, "FIFOTHR");
+
+  // Sync word
+  this->cc1101_write_verify_(reg::SYNC1, (p.sync_word >> 8) & 0xFF, "SYNC1");
+  this->cc1101_write_verify_(reg::SYNC0, p.sync_word & 0xFF, "SYNC0");
+
+  this->cc1101_write_verify_(reg::PKTLEN, p.pkt_len, "PKTLEN");
+  this->cc1101_write_verify_(reg::PKTCTRL1, 0x00, "PKTCTRL1");
+  this->cc1101_write_verify_(reg::PKTCTRL0, 0x00, "PKTCTRL0");
+  this->cc1101_write_verify_(reg::CHANNR, 0x00, "CHANNR");
+  this->cc1101_write_verify_(reg::FSCTRL1, 0x06, "FSCTRL1");
+  this->cc1101_write_verify_(reg::FSCTRL0, 0x00, "FSCTRL0");
+
+  // Frequency
+  uint64_t freq_word = ((uint64_t) p.freq_hz << 16) / (uint64_t) CC1101_XTAL_HZ;
+  uint8_t f2 = (freq_word >> 16) & 0xFF;
+  uint8_t f1 = (freq_word >> 8) & 0xFF;
+  uint8_t f0 = freq_word & 0xFF;
+  this->cc1101_write_verify_(reg::FREQ2, f2, "FREQ2");
+  this->cc1101_write_verify_(reg::FREQ1, f1, "FREQ1");
+  this->cc1101_write_verify_(reg::FREQ0, f0, "FREQ0");
+
+  // Modem
+  uint8_t drate_e, drate_m;
+  calc_drate_(p.bitrate_kbps, drate_e, drate_m);
+  uint8_t chanbw = calc_chanbw_(p.rxbw_khz);
+  uint8_t mdmcfg4 = chanbw | (drate_e & 0x0F);
+  this->cc1101_write_verify_(reg::MDMCFG4, mdmcfg4, "MDMCFG4");
+  this->cc1101_write_verify_(reg::MDMCFG3, drate_m, "MDMCFG3");
+
+  // MDMCFG2:
+  //   bit7=DEM_DCFILT_OFF (0=enabled), bits6-4=MOD_FORMAT (0=2-FSK),
+  //   bit3=MANCHESTER (0=off), bits2-0=SYNC_MODE.
+  // SYNC_MODE 0b010 = 16/16 sync match, 0b000 = no preamble/sync.
+  uint8_t mdmcfg2 = p.sync_enabled ? 0x02 : 0x00;
+  this->cc1101_write_verify_(reg::MDMCFG2, mdmcfg2, "MDMCFG2");
+
+  // 4-byte preamble, default channel-spacing exponent.
+  this->cc1101_write_verify_(reg::MDMCFG1, 0x22, "MDMCFG1");
+  this->cc1101_write_verify_(reg::MDMCFG0, 0xF8, "MDMCFG0");
+
+  uint8_t dev_e, dev_m;
+  calc_dev_(p.deviation_khz, dev_e, dev_m);
+  uint8_t deviatn = ((dev_e & 0x07) << 4) | (dev_m & 0x07);
+  this->cc1101_write_verify_(reg::DEVIATN, deviatn, "DEVIATN");
+
+  // MCSM: stay in RX after a packet, auto-cal IDLE->RX.
+  this->cc1101_write_verify_(reg::MCSM2, 0x07, "MCSM2");
+  this->cc1101_write_verify_(reg::MCSM1, 0x3F, "MCSM1");
+  this->cc1101_write_verify_(reg::MCSM0, 0x18, "MCSM0");
+
+  // Frequency offset comp + bit sync (TI-recommended for low-rate FSK).
+  this->cc1101_write_verify_(reg::FOCCFG, 0x16, "FOCCFG");
+  this->cc1101_write_verify_(reg::BSCFG, 0x6C, "BSCFG");
+
+  // AGC tuned for weak-signal reception (matthias-bs values).
+  this->cc1101_write_verify_(reg::AGCCTRL2, 0xC7, "AGCCTRL2");
+  this->cc1101_write_verify_(reg::AGCCTRL1, 0x00, "AGCCTRL1");
+  this->cc1101_write_verify_(reg::AGCCTRL0, 0xB2, "AGCCTRL0");
+
+  this->cc1101_write_verify_(reg::FREND1, 0xB6, "FREND1");
+  this->cc1101_write_verify_(reg::FREND0, 0x10, "FREND0");
+  this->cc1101_write_verify_(reg::FSCAL3, 0xEA, "FSCAL3");
+  this->cc1101_write_verify_(reg::FSCAL2, 0x2A, "FSCAL2");
+  this->cc1101_write_verify_(reg::FSCAL1, 0x00, "FSCAL1");
+  this->cc1101_write_verify_(reg::FSCAL0, 0x1F, "FSCAL0");
+  this->cc1101_write_verify_(reg::TEST2, 0x81, "TEST2");
+  this->cc1101_write_verify_(reg::TEST1, 0x35, "TEST1");
+  this->cc1101_write_verify_(reg::TEST0, 0x09, "TEST0");
+
+  uint8_t patable[] = {0xC0};
+  this->cc1101_write_burst_(reg::PATABLE, patable, sizeof(patable));
+
+  // Manual frequency calibration after register changes.
+  this->cc1101_strobe_(reg::SCAL);
+  delay(2);
+
+  ESP_LOGI(TAG, "    -> drate_e=%u drate_m=%u dev_e=%u dev_m=%u "
+                "MDMCFG4=0x%02X DEVIATN=0x%02X FREQ=%02X%02X%02X",
+           drate_e, drate_m, dev_e, dev_m, mdmcfg4, deviatn, f2, f1, f0);
+
+  this->cc1101_enter_rx_();
+}
+
+void BresserWeather::log_register_dump_() {
+  uint8_t marc = this->cc1101_read_status_(reg::MARCSTATE);
+  ESP_LOGI(TAG, "Register dump after init:");
+  ESP_LOGI(TAG, "  PARTNUM=0x%02X VERSION=0x%02X MARCSTATE=0x%02X",
+           this->cc1101_read_status_(reg::PARTNUM),
+           this->cc1101_read_status_(reg::VERSION), marc);
+  ESP_LOGI(TAG, "  FREQ=%02X%02X%02X", this->cc1101_read_reg_(reg::FREQ2),
+           this->cc1101_read_reg_(reg::FREQ1),
+           this->cc1101_read_reg_(reg::FREQ0));
+  ESP_LOGI(TAG, "  MDMCFG4=0x%02X MDMCFG3=0x%02X MDMCFG2=0x%02X DEVIATN=0x%02X",
+           this->cc1101_read_reg_(reg::MDMCFG4),
+           this->cc1101_read_reg_(reg::MDMCFG3),
+           this->cc1101_read_reg_(reg::MDMCFG2),
+           this->cc1101_read_reg_(reg::DEVIATN));
+  ESP_LOGI(TAG, "  SYNC=%02X%02X PKTLEN=0x%02X PKTCTRL0=0x%02X PKTCTRL1=0x%02X",
+           this->cc1101_read_reg_(reg::SYNC1),
+           this->cc1101_read_reg_(reg::SYNC0),
+           this->cc1101_read_reg_(reg::PKTLEN),
+           this->cc1101_read_reg_(reg::PKTCTRL0),
+           this->cc1101_read_reg_(reg::PKTCTRL1));
+  ESP_LOGI(TAG, "  AGCCTRL2/1/0=0x%02X/0x%02X/0x%02X FREND1=0x%02X",
+           this->cc1101_read_reg_(reg::AGCCTRL2),
+           this->cc1101_read_reg_(reg::AGCCTRL1),
+           this->cc1101_read_reg_(reg::AGCCTRL0),
+           this->cc1101_read_reg_(reg::FREND1));
+  if (marc != 0x0D) {
+    ESP_LOGW(TAG, "MARCSTATE=0x%02X is not RX(0x0D) - radio is not listening!",
+             marc);
+  }
 }
 
 // ---------------------------------------------------------------------------
 // Component lifecycle
 // ---------------------------------------------------------------------------
 void BresserWeather::setup() {
-  ESP_LOGI(TAG, "Setting up bresser_weather (CC1101 SPI driver)...");
+  ESP_LOGI(TAG, "Setting up bresser_weather (CC1101 SPI)...");
+  ESP_LOGI(TAG, "  pins MOSI=%d MISO=%d CLK=%d CS=%d GDO0=%d GDO2=%d",
+           mosi_pin_, miso_pin_, clk_pin_, cs_pin_, gdo0_pin_, gdo2_pin_);
+
   pinMode(this->cs_pin_, OUTPUT);
   digitalWrite(this->cs_pin_, HIGH);
   pinMode(this->gdo0_pin_, INPUT);
-  if (this->gdo2_pin_ >= 0) {
-    pinMode(this->gdo2_pin_, INPUT);
-  }
+  if (this->gdo2_pin_ >= 0) pinMode(this->gdo2_pin_, INPUT);
 
   this->spi_ = new SPIClass(VSPI);
-  this->spi_->begin(this->clk_pin_, this->miso_pin_, this->mosi_pin_, this->cs_pin_);
-  // ESPHome owns the CS pin via digitalWrite; tell the bus library not to touch it.
-  this->spi_->setHwCs(false);
-
+  // Pass -1 for CS so the bus driver leaves it to us.
+  this->spi_->begin(this->clk_pin_, this->miso_pin_, this->mosi_pin_, -1);
   delay(10);
 
-  this->radio_ready_ = this->cc1101_init_();
-  if (!this->radio_ready_) {
+  this->cc1101_reset_();
+  if (!this->cc1101_probe_()) {
+    ESP_LOGE(TAG, "CC1101 probe failed - component will be marked failed");
     this->mark_failed();
     return;
   }
-  this->cc1101_enter_rx_();
-  ESP_LOGI(TAG, "CC1101 ready, listening at %u Hz", this->frequency_hz_);
+
+  // Always pin the configured frequency into the canonical preset (index 0)
+  // so users can move from EU 868.30 to e.g. US 915 without forking the code.
+  RadioPreset live = PRESETS[0];
+  live.freq_hz = this->configured_freq_hz_;
+  this->apply_preset_(live);
+  this->log_register_dump_();
+  this->radio_ready_ = true;
+
+  this->scan_started_ms_ = millis();
+  ESP_LOGI(TAG, "CC1101 OK - listening on %.3f MHz",
+           this->configured_freq_hz_ / 1e6f);
+  if (this->scan_mode_) {
+    ESP_LOGI(TAG, "Scan mode ENABLED - cycling %u presets every %u ms",
+             (unsigned) PRESET_COUNT, this->scan_interval_ms_);
+  }
 }
 
 void BresserWeather::loop() {
-  if (!this->radio_ready_) {
-    return;
+  if (!this->radio_ready_) return;
+
+  uint32_t now = millis();
+
+  // ---- scan mode cycling ----
+  if (this->scan_mode_ &&
+      (now - this->scan_started_ms_) >= this->scan_interval_ms_) {
+    this->current_preset_idx_ = (this->current_preset_idx_ + 1) % PRESET_COUNT;
+    RadioPreset live = PRESETS[this->current_preset_idx_];
+    if (this->current_preset_idx_ == 0) live.freq_hz = this->configured_freq_hz_;
+    this->apply_preset_(live);
+    this->scan_started_ms_ = now;
   }
 
-  // GDO0 with IOCFG=0x06 is high while RX is in flight from sync detect to
-  // packet end. We poll for the falling edge by watching MARCSTATE/RXBYTES.
-  uint8_t rxbytes = this->cc1101_read_status_(CC1101_RXBYTES);
-  bool overflow = (rxbytes & 0x80) != 0;
-  uint8_t available = rxbytes & 0x7F;
+  // ---- periodic status log ----
+  if ((now - this->last_status_log_ms_) >= this->status_interval_ms_) {
+    this->last_status_log_ms_ = now;
+    uint8_t marc = this->cc1101_read_status_(reg::MARCSTATE);
+    uint8_t rxb = this->cc1101_read_status_(reg::RXBYTES);
+    uint8_t pktstatus = this->cc1101_read_status_(reg::PKTSTATUS);
+    int rssi_dbm = rssi_raw_to_dbm_(this->cc1101_read_status_(reg::RSSI));
+    bool gdo0 = digitalRead(this->gdo0_pin_) == HIGH;
+    const char *cfg = this->scan_mode_
+                          ? PRESETS[this->current_preset_idx_].name
+                          : "default";
+    ESP_LOGI(TAG, "Waiting... uptime=%us cfg=%s rx=%u/%u marc=0x%02X "
+                  "rxbytes=%u pktstatus=0x%02X rssi=%ddBm gdo0=%s",
+             now / 1000, cfg, this->valid_packets_, this->total_packets_,
+             marc, rxb & 0x7F, pktstatus, rssi_dbm,
+             gdo0 ? "HIGH" : "LOW");
+    if (marc != 0x0D) {
+      ESP_LOGW(TAG, "MARCSTATE=0x%02X != RX(0x0D) - re-entering RX", marc);
+      this->cc1101_enter_rx_();
+    }
+  }
+
+  // ---- packet reception ----
+  uint8_t rxb_raw = this->cc1101_read_status_(reg::RXBYTES);
+  bool overflow = (rxb_raw & 0x80) != 0;
+  uint8_t available = rxb_raw & 0x7F;
 
   if (overflow) {
-    ESP_LOGW(TAG, "CC1101 RX FIFO overflow, flushing");
+    ESP_LOGW(TAG, "RX FIFO overflow (rxbytes=0x%02X) - flushing", rxb_raw);
     this->cc1101_enter_rx_();
     return;
   }
 
-  if (available < BRESSER_PAYLOAD_LEN) {
-    return;
-  }
+  uint8_t want = PRESETS[this->current_preset_idx_].pkt_len;
+  if (this->scan_mode_ == false) want = PRESETS[0].pkt_len;
+  if (available < want) return;
 
-  BresserFrame frame{};
-  frame.length = BRESSER_PAYLOAD_LEN;
-
-  this->cc1101_read_burst_(CC1101_RXFIFO, frame.data, BRESSER_PAYLOAD_LEN);
-  uint8_t rssi_raw = this->cc1101_read_status_(CC1101_RSSI);
-  frame.rssi_dbm = BresserWeather::rssi_raw_to_dbm_(rssi_raw);
+  uint8_t buf[64];
+  if (want > sizeof(buf)) want = sizeof(buf);
+  this->cc1101_read_burst_(reg::FIFO, buf, want);
+  uint8_t rssi_raw = this->cc1101_read_status_(reg::RSSI);
+  int16_t rssi_dbm = rssi_raw_to_dbm_(rssi_raw);
 
   this->cc1101_enter_rx_();
 
-  uint32_t now = millis();
-  if (now - this->last_packet_ms_ < 250) {
-    // Same transmission burst (Bresser sends the frame multiple times).
+  if ((now - this->last_packet_ms_) < 250) {
+    // Bresser repeats the same frame within a single TX burst — drop dupes.
     return;
   }
   this->last_packet_ms_ = now;
+  this->total_packets_++;
+  this->handle_frame_(buf, want, rssi_dbm);
+}
 
-  ESP_LOGD(TAG, "Got %u-byte frame, RSSI=%d dBm", frame.length, frame.rssi_dbm);
-  if (!this->process_frame_(frame) && this->log_unknown_) {
-    char buf[3 * 27 + 1] = {0};
-    for (uint8_t i = 0; i < frame.length; ++i) {
-      snprintf(buf + i * 3, 4, "%02X ", frame.data[i]);
+void BresserWeather::handle_frame_(uint8_t *raw, uint8_t length,
+                                   int16_t rssi_dbm) {
+  const RadioPreset &cur = PRESETS[this->current_preset_idx_];
+
+  // Hex dump
+  char hex[3 * 64 + 1] = {0};
+  for (uint8_t i = 0; i < length; ++i) snprintf(hex + i * 3, 4, "%02X ", raw[i]);
+  ESP_LOGI(TAG, "[PKT cfg=%s n=%u rssi=%ddBm] HEX: %s", cur.name,
+           this->total_packets_, rssi_dbm, hex);
+
+  // Hunt for a 0x2DD4 sync word inside the payload (helps when scan ran
+  // without sync detection — we capture raw bits and locate the frame).
+  int sync_bit = find_sync_bit_(raw, length, 0x2DD4);
+  if (sync_bit >= 0) {
+    ESP_LOGI(TAG, "[PKT cfg=%s] Sync 0x2DD4 found at bit=%d (byte=%d.%d)",
+             cur.name, sync_bit, sync_bit / 8, sync_bit % 8);
+  }
+
+  // Diff vs previous packet
+  this->log_packet_diff_(raw, length);
+
+  // Try standard 7-in-1 decode against the captured payload directly. If the
+  // frame was received with sync detection, this is the canonical path.
+  bool decoded = this->decode_bresser_7in1_(raw, length, rssi_dbm,
+                                            this->scan_mode_);
+
+  // If sync was at a non-byte-aligned offset (typical when capturing raw
+  // bits), also try the bit-shifted variant.
+  if (!decoded && sync_bit > 0 && (sync_bit + 16 + 25 * 8) <= (int) (length * 8)) {
+    uint8_t shifted[27] = {0};
+    int data_bit = sync_bit + 16;
+    for (int i = 0; i < 25 && (data_bit / 8) < length; ++i) {
+      uint16_t hi = raw[data_bit / 8] << 8;
+      if ((data_bit / 8 + 1) < length) hi |= raw[data_bit / 8 + 1];
+      shifted[i] = (hi >> (8 - (data_bit % 8))) & 0xFF;
+      data_bit += 8;
     }
-    ESP_LOGW(TAG, "Undecoded frame: %s", buf);
+    ESP_LOGD(TAG, "[PKT cfg=%s] Trying bit-shifted decode at offset %d",
+             cur.name, sync_bit + 16);
+    decoded = this->decode_bresser_7in1_(shifted, 25, rssi_dbm, true);
+  }
+
+  this->publish_raw_(raw, length, rssi_dbm, sync_bit);
+
+  if (!decoded && this->log_unknown_) {
+    ESP_LOGW(TAG, "[PKT cfg=%s n=%u] Undecoded frame", cur.name,
+             this->total_packets_);
   }
 }
 
-void BresserWeather::dump_config() {
-  ESP_LOGCONFIG(TAG, "Bresser Weather (CC1101):");
-  ESP_LOGCONFIG(TAG, "  MOSI: %d  MISO: %d  CLK: %d  CS: %d", this->mosi_pin_,
-                this->miso_pin_, this->clk_pin_, this->cs_pin_);
-  ESP_LOGCONFIG(TAG, "  GDO0: %d  GDO2: %d", this->gdo0_pin_, this->gdo2_pin_);
-  ESP_LOGCONFIG(TAG, "  Frequency: %u Hz", this->frequency_hz_);
-  ESP_LOGCONFIG(TAG, "  Log unknown frames: %s", YESNO(this->log_unknown_));
-  ESP_LOGCONFIG(TAG, "  Radio ready: %s", YESNO(this->radio_ready_));
-  ESP_LOGCONFIG(TAG, "  Registered listeners: %u",
-                (unsigned) this->sensors_.size());
+bool BresserWeather::decode_bresser_7in1_(const uint8_t *raw, uint8_t length,
+                                          int16_t rssi_dbm, bool from_scan) {
+  if (length < 25) return false;
+
+  uint8_t msg[27];
+  memcpy(msg, raw, std::min<uint8_t>(length, 27));
+  for (uint8_t i = 0; i < 25; ++i) msg[i] ^= 0xAA;
+
+  uint16_t chk = ((uint16_t) msg[0] << 8) | msg[1];
+  uint16_t digest = lfsr_digest16_(&msg[2], 23, 0x8810, 0xBA95);
+  uint16_t xor_result = chk ^ digest;
+  bool crc_ok = (xor_result == 0x6DF1);
+
+  ESP_LOGI(TAG, "[PKT] CRC: %s (chk=0x%04X digest=0x%04X xor=0x%04X expected=0x6DF1)",
+           crc_ok ? "OK" : "FAIL", chk, digest, xor_result);
+
+  if (!crc_ok) {
+    if (from_scan) {
+      // In scan mode: log decoded fields anyway — useful for tuning.
+      ESP_LOGD(TAG, "[PKT] CRC failed but logging would-be fields below for inspection");
+    } else {
+      return false;
+    }
+  }
+
+  uint8_t s_type = msg[6] >> 4;
+  uint8_t channel = msg[6] & 0x07;
+  uint16_t sensor_id = ((uint16_t) msg[2] << 8) | msg[3];
+
+  int wdir_raw = (msg[4] >> 4) * 100 + (msg[4] & 0x0F) * 10 + (msg[5] >> 4);
+  int wavg_raw = (msg[8] & 0x0F) * 100 + (msg[9] >> 4) * 10 + (msg[9] & 0x0F);
+  int temp_raw = (msg[14] >> 4) * 100 + (msg[14] & 0x0F) * 10 + (msg[15] >> 4);
+  int humidity = (msg[16] >> 4) * 10 + (msg[16] & 0x0F);
+  int rain_raw = (msg[10] >> 4) * 100000 + (msg[10] & 0x0F) * 10000 +
+                 (msg[11] >> 4) * 1000 + (msg[11] & 0x0F) * 100 +
+                 (msg[12] >> 4) * 10 + (msg[12] & 0x0F);
+  int light_raw = (msg[17] >> 4) * 100000 + (msg[17] & 0x0F) * 10000 +
+                  (msg[18] >> 4) * 1000 + (msg[18] & 0x0F) * 100 +
+                  (msg[19] >> 4) * 10 + (msg[19] & 0x0F);
+  int uv_raw = (msg[20] >> 4) * 100 + (msg[20] & 0x0F) * 10 + (msg[21] >> 4);
+
+  float temp_c = (temp_raw > 600) ? (temp_raw - 1000) * 0.1f : temp_raw * 0.1f;
+  float wavg_kmh = wavg_raw * 0.1f * 3.6f;
+  float rain_mm = rain_raw * 0.1f;
+  float uv_idx = uv_raw * 0.1f;
+
+  bool plaus_temp = (temp_c >= -50.0f && temp_c <= 80.0f);
+  bool plaus_hum = (humidity >= 0 && humidity <= 100);
+  bool plaus_wdir = (wdir_raw >= 0 && wdir_raw <= 360);
+  bool plaus_wavg = (wavg_kmh >= 0.0f && wavg_kmh <= 200.0f);
+
+  ESP_LOGI(TAG,
+           "[PKT] decode id=0x%04X ch=%u s_type=0x%X T=%.1f°C[%s] RH=%d%%[%s] "
+           "Wavg=%.1fkm/h[%s] Wdir=%d°[%s] Rain=%.1fmm UV=%.1f Lux=%d",
+           sensor_id, channel, s_type, temp_c, plaus_temp ? "OK" : "OOR",
+           humidity, plaus_hum ? "OK" : "OOR", wavg_kmh,
+           plaus_wavg ? "OK" : "OOR", wdir_raw, plaus_wdir ? "OK" : "OOR",
+           rain_mm, uv_idx, light_raw);
+
+  bool is_weather =
+      (s_type == 0x01 || s_type == 0x03 || s_type == 0x04 || s_type == 0x08);
+  if (!crc_ok || !is_weather) return false;
+  if (!plaus_temp || !plaus_hum) {
+    ESP_LOGW(TAG, "[PKT] CRC OK but values implausible - rejecting");
+    return false;
+  }
+
+  this->valid_packets_++;
+  this->publish_decoded_(temp_c, (float) humidity, wavg_kmh, (float) wdir_raw,
+                         rain_mm, uv_idx, (float) light_raw, NAN, rssi_dbm);
+  return true;
 }
 
-void BresserWeatherSensor::dump_config() {
-  ESP_LOGCONFIG(TAG, "Bresser Weather Sensor:");
-  LOG_SENSOR("  ", "Temperature", this->temperature_);
-  LOG_SENSOR("  ", "Humidity", this->humidity_);
-  LOG_SENSOR("  ", "Wind speed", this->wind_speed_);
-  LOG_SENSOR("  ", "Wind direction", this->wind_direction_);
-  LOG_SENSOR("  ", "Rain total", this->rain_total_);
-  LOG_SENSOR("  ", "UV index", this->uv_index_);
-  LOG_SENSOR("  ", "Light", this->light_lux_);
-  LOG_SENSOR("  ", "Pressure", this->pressure_);
-  LOG_SENSOR("  ", "RSSI", this->rssi_);
+void BresserWeather::log_packet_diff_(const uint8_t *raw, uint8_t length) {
+  if (this->prev_payload_len_ > 0 && this->prev_payload_len_ == length) {
+    int identical = 0;
+    int diff_pos[8] = {0};
+    int diff_n = 0;
+    for (uint8_t i = 0; i < length; ++i) {
+      if (raw[i] == this->prev_payload_[i]) {
+        identical++;
+      } else if (diff_n < 8) {
+        diff_pos[diff_n++] = i;
+      }
+    }
+    char dpos[64] = {0};
+    for (int i = 0; i < diff_n; ++i) {
+      char tmp[6];
+      snprintf(tmp, sizeof(tmp), "%d%s", diff_pos[i], i + 1 < diff_n ? "," : "");
+      strncat(dpos, tmp, sizeof(dpos) - strlen(dpos) - 1);
+    }
+    ESP_LOGD(TAG, "[PKT] diff vs prev: %d/%d identical, changed at [%s]",
+             identical, length, dpos);
+  }
+  memcpy(this->prev_payload_, raw, std::min<uint8_t>(length, 64));
+  this->prev_payload_len_ = length;
 }
 
 // ---------------------------------------------------------------------------
-// Bresser 7-in-1 decoder, ported from rtl_433/src/devices/bresser_7in1.c
+// Helpers
 // ---------------------------------------------------------------------------
+int16_t BresserWeather::rssi_raw_to_dbm_(uint8_t raw) {
+  int16_t v = (raw >= 128) ? ((int16_t) raw - 256) : (int16_t) raw;
+  return v / 2 - 74;
+}
+
 uint16_t BresserWeather::lfsr_digest16_(const uint8_t *message, unsigned bytes,
                                         uint16_t gen, uint16_t key) {
   uint16_t sum = 0;
   for (unsigned k = 0; k < bytes; ++k) {
     uint8_t data = message[k];
     for (int i = 7; i >= 0; --i) {
-      if ((data >> i) & 1) {
-        sum ^= key;
-      }
+      if ((data >> i) & 1) sum ^= key;
       if (key & 1) {
         key = (key >> 1) ^ gen;
       } else {
@@ -400,133 +710,90 @@ uint16_t BresserWeather::lfsr_digest16_(const uint8_t *message, unsigned bytes,
   return sum;
 }
 
-int16_t BresserWeather::rssi_raw_to_dbm_(uint8_t raw) {
-  // CC1101 datasheet RSSI conversion. Offset of 74 dB at default settings.
-  int16_t v = (raw >= 128) ? ((int16_t) raw - 256) : (int16_t) raw;
-  return v / 2 - 74;
+int BresserWeather::find_sync_bit_(const uint8_t *raw, uint8_t length,
+                                   uint16_t sync_word) {
+  if (length < 2) return -1;
+  uint32_t window = 0;
+  int total_bits = length * 8;
+  for (int b = 0; b < total_bits; ++b) {
+    uint8_t bit = (raw[b / 8] >> (7 - (b % 8))) & 1;
+    window = ((window << 1) | bit) & 0xFFFF;
+    if (b >= 15 && (uint16_t) window == sync_word) {
+      return b - 15;
+    }
+  }
+  return -1;
 }
 
-bool BresserWeather::process_frame_(const BresserFrame &frame) {
-  uint8_t buf[27];
-  if (frame.length < 25) {
-    return false;
-  }
-  uint8_t msg_len = frame.length;
-  if (msg_len > sizeof(buf)) {
-    msg_len = sizeof(buf);
-  }
-  memcpy(buf, frame.data, msg_len);
-  return this->decode_bresser_7in1_(buf, msg_len, frame.rssi_dbm);
+void BresserWeather::publish_raw_(const uint8_t *raw, uint8_t length,
+                                  int16_t rssi_dbm, int sync_offset_bit) {
+  if (this->raw_dump_topic_.empty()) return;
+#ifdef USE_MQTT
+  if (mqtt::global_mqtt_client == nullptr) return;
+  char hex[3 * 64 + 1] = {0};
+  for (uint8_t i = 0; i < length; ++i) snprintf(hex + i * 2, 3, "%02X", raw[i]);
+  char payload[512];
+  const RadioPreset &cur = PRESETS[this->current_preset_idx_];
+  snprintf(payload, sizeof(payload),
+           "{\"cfg\":\"%s\",\"freq_hz\":%u,\"rssi_dbm\":%d,\"ts\":%u,"
+           "\"len\":%u,\"sync_bit\":%d,\"hex\":\"%s\"}",
+           cur.name, (unsigned) cur.freq_hz, rssi_dbm, (unsigned) (millis() / 1000),
+           length, sync_offset_bit, hex);
+  mqtt::global_mqtt_client->publish(this->raw_dump_topic_,
+                                    std::string(payload));
+#else
+  (void) raw;
+  (void) length;
+  (void) rssi_dbm;
+  (void) sync_offset_bit;
+#endif
 }
 
-bool BresserWeather::decode_bresser_7in1_(uint8_t *msg, uint8_t length,
-                                          int16_t rssi_dbm) {
-  // The first 25 bytes carry the protocol payload; trailing bytes (if any)
-  // are ignored. Whitening is a uniform XOR with 0xAA.
-  if (length < 25) {
-    return false;
-  }
-  for (uint8_t i = 0; i < 25; ++i) {
-    msg[i] ^= 0xAA;
-  }
-
-  uint16_t chk = (uint16_t) (msg[0] << 8) | msg[1];
-  uint16_t digest = BresserWeather::lfsr_digest16_(&msg[2], 23, 0x8810, 0xBA95);
-  if ((uint16_t) (chk ^ digest) != 0x6DF1) {
-    return false;
-  }
-
-  uint8_t s_type = msg[6] >> 4;
-  uint8_t channel = msg[6] & 0x07;
-  uint16_t sensor_id = ((uint16_t) msg[2] << 8) | msg[3];
-
-  // Weather variants we know how to decode.
-  bool is_weather =
-      (s_type == 0x01 || s_type == 0x03 || s_type == 0x04 || s_type == 0x08);
-  if (!is_weather) {
-    ESP_LOGD(TAG, "Bresser frame: id=0x%04X type=0x%X channel=%u (not a weather variant)",
-             sensor_id, s_type, channel);
-    return false;
-  }
-
-  // Wind direction: 3 BCD digits in bytes 4..5 (high nibble, low nibble, high nibble).
-  int wdir_raw = (msg[4] >> 4) * 100 + (msg[4] & 0x0F) * 10 + (msg[5] >> 4);
-  // Wind average: 3 BCD digits across bytes 8..9 (low nibble, high nibble, low nibble), m/s.
-  int wavg_raw = (msg[8] & 0x0F) * 100 + (msg[9] >> 4) * 10 + (msg[9] & 0x0F);
-  // Temperature: 3 BCD digits in bytes 14..15 (with low-nibble flags).
-  int temp_raw = (msg[14] >> 4) * 100 + (msg[14] & 0x0F) * 10 + (msg[15] >> 4);
-  // Humidity: 2 BCD digits in byte 16.
-  int humidity = (msg[16] >> 4) * 10 + (msg[16] & 0x0F);
-  // Rain: 6 BCD digits in bytes 10..12, x0.1 mm.
-  int rain_raw = (msg[10] >> 4) * 100000 + (msg[10] & 0x0F) * 10000 +
-                 (msg[11] >> 4) * 1000 + (msg[11] & 0x0F) * 100 +
-                 (msg[12] >> 4) * 10 + (msg[12] & 0x0F);
-  // Light: 6 BCD digits in bytes 17..19 in lux.
-  int light_raw = (msg[17] >> 4) * 100000 + (msg[17] & 0x0F) * 10000 +
-                  (msg[18] >> 4) * 1000 + (msg[18] & 0x0F) * 100 +
-                  (msg[19] >> 4) * 10 + (msg[19] & 0x0F);
-  // UV: 3 BCD digits in bytes 20..21, x0.1.
-  int uv_raw = (msg[20] >> 4) * 100 + (msg[20] & 0x0F) * 10 + (msg[21] >> 4);
-
-  float temperature_c = temp_raw * 0.1f;
-  if (temp_raw > 600) {
-    // Bresser encodes negative temperatures as 1000 - |T*10|.
-    temperature_c = (temp_raw - 1000) * 0.1f;
-  }
-  float wind_avg_kmh = wavg_raw * 0.1f * 3.6f;
-  float wind_dir_deg = (float) wdir_raw;
-  float rain_mm = rain_raw * 0.1f;
-  float uv_index = uv_raw * 0.1f;
-  float light_lux = (float) light_raw;
-  float humidity_pct = (float) humidity;
-  // Pressure is not carried by the standard 7-in-1 frame; leave NaN so
-  // listeners that don't bind a pressure sensor stay clean.
-  float pressure_hpa = NAN;
-
-  ESP_LOGI(TAG,
-           "Bresser 7-in-1 id=0x%04X ch=%u T=%.1f°C RH=%d%% Wavg=%.1fkm/h "
-           "Wdir=%d° Rain=%.1fmm UV=%.1f Lux=%.0f RSSI=%ddBm",
-           sensor_id, channel, temperature_c, humidity, wind_avg_kmh, wdir_raw,
-           rain_mm, uv_index, light_lux, rssi_dbm);
-
-  this->publish_(temperature_c, humidity_pct, wind_avg_kmh, wind_dir_deg,
-                 rain_mm, uv_index, light_lux, pressure_hpa, rssi_dbm);
-  return true;
-}
-
-void BresserWeather::publish_(float temperature, float humidity,
-                              float wind_speed_kmh, float wind_dir_deg,
-                              float rain_mm, float uv_index, float light_lux,
-                              float pressure_hpa, int16_t rssi_dbm) {
+void BresserWeather::publish_decoded_(float t, float h, float wkmh, float wdir,
+                                      float rmm, float uv, float lux, float p,
+                                      int16_t rssi_dbm) {
   for (auto *s : this->sensors_) {
-    if (s->temperature_ != nullptr && !std::isnan(temperature)) {
-      s->temperature_->publish_state(temperature);
-    }
-    if (s->humidity_ != nullptr && !std::isnan(humidity)) {
-      s->humidity_->publish_state(humidity);
-    }
-    if (s->wind_speed_ != nullptr && !std::isnan(wind_speed_kmh)) {
-      s->wind_speed_->publish_state(wind_speed_kmh);
-    }
-    if (s->wind_direction_ != nullptr && !std::isnan(wind_dir_deg)) {
-      s->wind_direction_->publish_state(wind_dir_deg);
-    }
-    if (s->rain_total_ != nullptr && !std::isnan(rain_mm)) {
-      s->rain_total_->publish_state(rain_mm);
-    }
-    if (s->uv_index_ != nullptr && !std::isnan(uv_index)) {
-      s->uv_index_->publish_state(uv_index);
-    }
-    if (s->light_lux_ != nullptr && !std::isnan(light_lux)) {
-      s->light_lux_->publish_state(light_lux);
-    }
-    if (s->pressure_ != nullptr && !std::isnan(pressure_hpa)) {
-      s->pressure_->publish_state(pressure_hpa);
-    }
-    if (s->rssi_ != nullptr) {
-      s->rssi_->publish_state(rssi_dbm);
-    }
+    if (s->temperature_ && !std::isnan(t)) s->temperature_->publish_state(t);
+    if (s->humidity_ && !std::isnan(h)) s->humidity_->publish_state(h);
+    if (s->wind_speed_ && !std::isnan(wkmh)) s->wind_speed_->publish_state(wkmh);
+    if (s->wind_direction_ && !std::isnan(wdir)) s->wind_direction_->publish_state(wdir);
+    if (s->rain_total_ && !std::isnan(rmm)) s->rain_total_->publish_state(rmm);
+    if (s->uv_index_ && !std::isnan(uv)) s->uv_index_->publish_state(uv);
+    if (s->light_lux_ && !std::isnan(lux)) s->light_lux_->publish_state(lux);
+    if (s->pressure_ && !std::isnan(p)) s->pressure_->publish_state(p);
+    if (s->rssi_) s->rssi_->publish_state(rssi_dbm);
   }
+}
+
+// ---------------------------------------------------------------------------
+// dump_config
+// ---------------------------------------------------------------------------
+void BresserWeather::dump_config() {
+  ESP_LOGCONFIG(TAG, "Bresser Weather (CC1101):");
+  ESP_LOGCONFIG(TAG, "  MOSI=%d MISO=%d CLK=%d CS=%d GDO0=%d GDO2=%d",
+                mosi_pin_, miso_pin_, clk_pin_, cs_pin_, gdo0_pin_, gdo2_pin_);
+  ESP_LOGCONFIG(TAG, "  Frequency: %.3f MHz", configured_freq_hz_ / 1e6f);
+  ESP_LOGCONFIG(TAG, "  Log unknown frames: %s", YESNO(log_unknown_));
+  ESP_LOGCONFIG(TAG, "  Scan mode: %s (interval=%u ms)", YESNO(scan_mode_),
+                (unsigned) scan_interval_ms_);
+  ESP_LOGCONFIG(TAG, "  Status interval: %u ms", (unsigned) status_interval_ms_);
+  if (!raw_dump_topic_.empty())
+    ESP_LOGCONFIG(TAG, "  Raw dump MQTT topic: %s", raw_dump_topic_.c_str());
+  ESP_LOGCONFIG(TAG, "  Radio ready: %s", YESNO(radio_ready_));
+  ESP_LOGCONFIG(TAG, "  Sensor listeners: %u", (unsigned) sensors_.size());
+}
+
+void BresserWeatherSensor::dump_config() {
+  ESP_LOGCONFIG(TAG, "Bresser Weather Sensor:");
+  LOG_SENSOR("  ", "Temperature", temperature_);
+  LOG_SENSOR("  ", "Humidity", humidity_);
+  LOG_SENSOR("  ", "Wind speed", wind_speed_);
+  LOG_SENSOR("  ", "Wind direction", wind_direction_);
+  LOG_SENSOR("  ", "Rain total", rain_total_);
+  LOG_SENSOR("  ", "UV index", uv_index_);
+  LOG_SENSOR("  ", "Light", light_lux_);
+  LOG_SENSOR("  ", "Pressure", pressure_);
+  LOG_SENSOR("  ", "RSSI", rssi_);
 }
 
 }  // namespace bresser_weather

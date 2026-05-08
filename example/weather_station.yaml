@@ -1,6 +1,6 @@
-# Example ESPHome configuration for the bresser_weather external component.
-# Tested against ESPHome 2026.4.x with an ESP32 DevKit and an E07-M1101D
-# (CC1101) radio module.
+# ESPHome configuration for the bresser_weather external component.
+# Targets ESP32 + CC1101 (E07-M1101D or similar) listening for a
+# Bresser 7-in-1 / VEVOR YT60231 outdoor sensor at 868.30 MHz FSK.
 
 esphome:
   name: weather-station
@@ -13,6 +13,9 @@ esp32:
 
 logger:
   level: DEBUG
+  # Drop SPI register write spam to VERBOSE level only.
+  logs:
+    bresser_weather: INFO
 
 api:
 ota:
@@ -21,6 +24,13 @@ ota:
 wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
+
+# Optional: enables the raw_dump_topic feature below.
+# Comment out if you don't have an MQTT broker.
+# mqtt:
+#   broker: 192.168.1.10
+#   username: !secret mqtt_user
+#   password: !secret mqtt_pass
 
 external_components:
   - source: github://ryszardlet/esphome-bresser-weather@main
@@ -35,6 +45,24 @@ bresser_weather:
   gdo2_pin: GPIO27
   frequency: 868.30
   log_unknown: true
+
+  # Diagnostic settings — turn these on while you're getting a sensor
+  # working for the first time, then turn them off to reduce log noise.
+
+  # When true, every status_interval the component cycles through the
+  # built-in radio presets to find one that decodes your sensor. Leave
+  # this OFF once you've confirmed packets decode reliably.
+  scan_mode: false
+  scan_interval: 30s
+
+  # How often the loop logs "Waiting... uptime=Xs marc=0x0D rxbytes=0 ...".
+  # Set to a longer interval (e.g. 60s) once stable.
+  status_interval: 10s
+
+  # Optional: every received packet is published as a JSON blob to this
+  # MQTT topic. Useful for off-device protocol analysis. Requires the
+  # `mqtt:` component above.
+  # raw_dump_topic: "bresser/raw"
 
 sensor:
   - platform: bresser_weather
@@ -52,7 +80,10 @@ sensor:
       name: "Indeks UV"
     light_lux:
       name: "Natężenie światła"
-    pressure:
-      name: "Ciśnienie"
+    # NOTE: the outdoor sensor does NOT transmit pressure - it's measured by
+    # the indoor base station. The schema accepts this entry for forward
+    # compatibility, but the sensor will never publish a value.
+    # pressure:
+    #   name: "Ciśnienie"
     rssi:
       name: "RSSI stacji"
