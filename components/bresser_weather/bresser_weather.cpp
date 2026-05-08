@@ -117,23 +117,27 @@ const RadioPreset BresserWeather::PRESETS[BresserWeather::PRESET_COUNT] = {
 void BresserWeather::cc1101_select_() { digitalWrite(this->cs_pin_, LOW); }
 void BresserWeather::cc1101_deselect_() { digitalWrite(this->cs_pin_, HIGH); }
 
-// Software SPI (mode 0, MSB first). One bit per loop iteration:
+// Software SPI (mode 0, MSB first). One bit per iteration:
 //   1. set MOSI to outgoing bit
-//   2. CLK rising edge
-//   3. half-period delay
-//   4. sample MISO
-//   5. CLK falling edge
-//   6. half-period delay
-// At 1 us half-period this gives ~500 kHz, plenty for CC1101.
+//   2. setup-time delay (MOSI valid before CLK rising) — IMPORTANT: without
+//      this delay the chip occasionally latches the wrong bit, giving us
+//      intermittent SPI failure.
+//   3. CLK rising edge
+//   4. half-period delay (chip outputs MISO data)
+//   5. sample MISO
+//   6. CLK falling edge
+//   7. half-period delay
 uint8_t BresserWeather::bitbang_xfer_(uint8_t out) {
   uint8_t in = 0;
+  uint32_t hp = this->bitbang_half_period_us_;
   for (int i = 7; i >= 0; --i) {
     digitalWrite(this->mosi_pin_, (out >> i) & 1 ? HIGH : LOW);
+    if (hp) delayMicroseconds(hp);  // MOSI setup time
     digitalWrite(this->clk_pin_, HIGH);
-    if (this->bitbang_half_period_us_) delayMicroseconds(this->bitbang_half_period_us_);
+    if (hp) delayMicroseconds(hp);  // CLK high half — MISO sample window
     in = (in << 1) | (digitalRead(this->miso_pin_) ? 1 : 0);
     digitalWrite(this->clk_pin_, LOW);
-    if (this->bitbang_half_period_us_) delayMicroseconds(this->bitbang_half_period_us_);
+    if (hp) delayMicroseconds(hp);  // CLK low half — chip updates MISO
   }
   return in;
 }
@@ -519,7 +523,7 @@ void BresserWeather::setup() {
   // ESP_LOGE here only reaches a serial console. We capture all diagnostic
   // results into member fields so the early loop() iterations can re-emit
   // them — that way the user sees them over OTA too.
-  ESP_LOGE(TAG, "=== bresser_weather setup() entry (v0.2.7) ===");
+  ESP_LOGE(TAG, "=== bresser_weather setup() entry (v0.2.8) ===");
   ESP_LOGE(TAG, "  pins MOSI=%d MISO=%d CLK=%d CS=%d GDO0=%d GDO2=%d",
            mosi_pin_, miso_pin_, clk_pin_, cs_pin_, gdo0_pin_, gdo2_pin_);
   ESP_LOGE(TAG, "  SPI mode: %s @ %u Hz",
@@ -897,6 +901,19 @@ void BresserWeather::loop() {
              now / 1000, cfg, this->valid_packets_, this->total_packets_,
              marc, rxb & 0x7F, pktstatus, rssi_dbm,
              gdo0 ? "HIGH" : "LOW");
+    // Persistent boot diagnostic summary — always visible regardless of
+    // log scroll. Helps when BOOT-DIAG block has rolled out of the buffer.
+    ESP_LOGI(TAG, "  boot-diag: PARTNUM=0x%02X VERSION=0x%02X | "
+                  "defaults IOCFG2=0x%02X(exp 0x29) FSCTRL1=0x%02X(0x0F) "
+                  "MDMCFG3=0x%02X(0x83) TEST2=0x%02X(0x88) | "
+                  "IOCFG2 wr/rd 0x55=0x%02X | %s/%s",
+             this->diag_partnum_, this->diag_version_,
+             this->diag_default_iocfg2_, this->diag_default_fsctrl1_,
+             this->diag_default_mdmcfg3_, this->diag_default_test2_,
+             this->diag_default_iocfg2_after_write_,
+             this->diag_any_default_match_ ? "READS-OK" : "READS-DEAD",
+             this->diag_default_iocfg2_after_write_ == 0x55 ? "WRITES-OK"
+                                                            : "WRITES-DEAD");
     if (marc != 0x0D) {
       ESP_LOGW(TAG, "MARCSTATE=0x%02X != RX(0x0D) - re-entering RX", marc);
       this->cc1101_enter_rx_();
