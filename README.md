@@ -145,7 +145,7 @@ You can subscribe with `mosquitto_sub -t bresser/raw` and feed the hex into Pyth
 
 ## Troubleshooting
 
-**No `CC1101 PARTNUM=0x00 VERSION=0x14` line at boot.** SPI wiring problem. The component will mark itself failed and stop. Check 3.3 V power, MISO not swapped with MOSI, and CS active-low.
+**No `CC1101 PARTNUM=0x00 VERSION=0x14` line at boot.** SPI wiring problem — but the component **does NOT mark itself failed** in v0.2.1+; it keeps running and logs garbage register values so you can see what's happening. If `SNOP returned status byte=0xFF` appears at startup, MISO is stuck high (chip not powered, MISO miswired, or wrong CS pin).
 
 **`PARTNUM`/`VERSION` line appears but `MARCSTATE != 0x0D` in heartbeat.** The chip isn't entering RX. Usually a frequency calibration issue — try `scan_mode: true` so the loop re-applies presets and re-strobes RX every interval.
 

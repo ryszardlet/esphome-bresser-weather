@@ -102,28 +102,40 @@ const RadioPreset BresserWeather::PRESETS[BresserWeather::PRESET_COUNT] = {
 
 // ---------------------------------------------------------------------------
 // SPI plumbing
+//
+// Mirrors the wiring used by ryszardlet/esphome-wmbus-cc1101's CC1101Driver,
+// which is known-good on the same ESP32 + CC1101 hardware:
+//   1) cs_low_()
+//   2) wait_miso_low_()         <-- chip ready (CHIP_RDYn)
+//   3) spi.beginTransaction(...)
+//   4) spi.transfer(...)
+//   5) spi.endTransaction()
+//   6) cs_high_()
+// CS is toggled OUTSIDE the transaction wrapper; that's what the working
+// driver does and what fixes the silent setup() failure we saw in v0.2.0.
 // ---------------------------------------------------------------------------
 void BresserWeather::cc1101_select_() { digitalWrite(this->cs_pin_, LOW); }
 void BresserWeather::cc1101_deselect_() { digitalWrite(this->cs_pin_, HIGH); }
 
 bool BresserWeather::cc1101_wait_miso_low_() {
-  uint32_t start = micros();
+  // CC1101 holds CHIP_RDYn (= MISO) high until its crystal stabilises after
+  // CS is asserted. Match wmbus driver's 20 ms deadline; if MISO never goes
+  // low we still return so the caller can probe registers and decide.
+  uint32_t deadline = millis() + 20;
   while (digitalRead(this->miso_pin_) == HIGH) {
-    if ((uint32_t) (micros() - start) > 5000) {
-      return false;
-    }
+    if ((int32_t) (millis() - deadline) >= 0) return false;
   }
   return true;
 }
 
 void BresserWeather::cc1101_write_reg_(uint8_t addr, uint8_t value) {
-  this->spi_->beginTransaction(this->spi_settings_);
   this->cc1101_select_();
   this->cc1101_wait_miso_low_();
+  this->spi_->beginTransaction(this->spi_settings_);
   this->spi_->transfer(addr);
   this->spi_->transfer(value);
-  this->cc1101_deselect_();
   this->spi_->endTransaction();
+  this->cc1101_deselect_();
   ESP_LOGV(TAG, "WR 0x%02X = 0x%02X", addr, value);
 }
 
@@ -140,85 +152,104 @@ bool BresserWeather::cc1101_write_verify_(uint8_t addr, uint8_t value,
 }
 
 uint8_t BresserWeather::cc1101_read_reg_(uint8_t addr) {
-  this->spi_->beginTransaction(this->spi_settings_);
   this->cc1101_select_();
   this->cc1101_wait_miso_low_();
+  this->spi_->beginTransaction(this->spi_settings_);
   this->spi_->transfer(addr | reg::READ_SINGLE);
   uint8_t v = this->spi_->transfer(0);
-  this->cc1101_deselect_();
   this->spi_->endTransaction();
+  this->cc1101_deselect_();
   return v;
 }
 
 uint8_t BresserWeather::cc1101_read_status_(uint8_t addr) {
-  this->spi_->beginTransaction(this->spi_settings_);
+  // Status registers (0x30..0x3D) MUST use the burst bit per datasheet §10.3.
   this->cc1101_select_();
   this->cc1101_wait_miso_low_();
+  this->spi_->beginTransaction(this->spi_settings_);
   this->spi_->transfer(addr | reg::READ_BURST);
   uint8_t v = this->spi_->transfer(0);
-  this->cc1101_deselect_();
   this->spi_->endTransaction();
+  this->cc1101_deselect_();
   return v;
 }
 
 void BresserWeather::cc1101_strobe_(uint8_t cmd) {
-  this->spi_->beginTransaction(this->spi_settings_);
   this->cc1101_select_();
   this->cc1101_wait_miso_low_();
+  this->spi_->beginTransaction(this->spi_settings_);
   this->spi_->transfer(cmd);
-  this->cc1101_deselect_();
   this->spi_->endTransaction();
+  this->cc1101_deselect_();
 }
 
 void BresserWeather::cc1101_read_burst_(uint8_t addr, uint8_t *buf,
                                         uint8_t len) {
-  this->spi_->beginTransaction(this->spi_settings_);
   this->cc1101_select_();
   this->cc1101_wait_miso_low_();
+  this->spi_->beginTransaction(this->spi_settings_);
   this->spi_->transfer(addr | reg::READ_BURST);
   for (uint8_t i = 0; i < len; ++i) buf[i] = this->spi_->transfer(0);
-  this->cc1101_deselect_();
   this->spi_->endTransaction();
+  this->cc1101_deselect_();
 }
 
 void BresserWeather::cc1101_write_burst_(uint8_t addr, const uint8_t *buf,
                                          uint8_t len) {
-  this->spi_->beginTransaction(this->spi_settings_);
   this->cc1101_select_();
   this->cc1101_wait_miso_low_();
+  this->spi_->beginTransaction(this->spi_settings_);
   this->spi_->transfer(addr | reg::WRITE_BURST);
   for (uint8_t i = 0; i < len; ++i) this->spi_->transfer(buf[i]);
-  this->cc1101_deselect_();
   this->spi_->endTransaction();
+  this->cc1101_deselect_();
 }
 
+// Manual reset per datasheet §19.1.2. Identical to wmbus_cc1101's version
+// (which works on the user's same hardware), with explicit CS+transaction
+// wrap around the SRES strobe.
 void BresserWeather::cc1101_reset_() {
+  ESP_LOGI(TAG, "  CC1101 reset: CS dance + SRES strobe");
   digitalWrite(this->cs_pin_, HIGH);
-  delayMicroseconds(5);
+  delayMicroseconds(40);
   digitalWrite(this->cs_pin_, LOW);
-  delayMicroseconds(5);
+  delayMicroseconds(40);
   digitalWrite(this->cs_pin_, HIGH);
-  delayMicroseconds(45);
-  this->cc1101_strobe_(reg::SRES);
-  delay(2);
+  delayMicroseconds(40);
+  digitalWrite(this->cs_pin_, LOW);
+  bool miso_ok_pre = this->cc1101_wait_miso_low_();
+  this->spi_->beginTransaction(this->spi_settings_);
+  uint8_t reset_status = this->spi_->transfer(reg::SRES);
+  this->spi_->endTransaction();
+  bool miso_ok_post = this->cc1101_wait_miso_low_();
+  digitalWrite(this->cs_pin_, HIGH);
+  delay(10);
+  ESP_LOGI(TAG, "  reset: SRES status byte=0x%02X miso_pre=%s miso_post=%s",
+           reset_status, miso_ok_pre ? "LOW" : "HIGH/timeout",
+           miso_ok_post ? "LOW" : "HIGH/timeout");
 }
 
 bool BresserWeather::cc1101_probe_() {
   uint8_t part = this->cc1101_read_status_(reg::PARTNUM);
   uint8_t version = this->cc1101_read_status_(reg::VERSION);
-  ESP_LOGI(TAG, "CC1101 PARTNUM=0x%02X VERSION=0x%02X", part, version);
-  if (part != 0x00) {
-    ESP_LOGE(TAG, "CC1101 PARTNUM unexpected (0x%02X) - check SPI wiring", part);
-    return false;
-  }
+  ESP_LOGI(TAG, "  CC1101 probe: PARTNUM=0x%02X VERSION=0x%02X", part, version);
+
+  // We do NOT mark_failed on any of these — the user wants the component to
+  // keep running so they can see follow-on logs / try scan_mode / etc.
   if (version == 0x00 || version == 0xFF) {
-    ESP_LOGE(TAG, "CC1101 VERSION 0x%02X - chip not responding (check power, MISO, CS)",
+    ESP_LOGE(TAG,
+             "  CC1101 not responding (VERSION=0x%02X). Check 3.3V power, "
+             "MOSI/MISO swap, CS active-low, SCK frequency. Continuing anyway.",
              version);
     return false;
+  }
+  if (part != 0x00) {
+    ESP_LOGW(TAG, "  CC1101 PARTNUM=0x%02X unexpected (TI sells only 0x00). "
+                  "Some clones report different — continuing.", part);
   }
   if (version != 0x04 && version != 0x14) {
-    ESP_LOGW(TAG, "CC1101 VERSION 0x%02X is unusual - expected 0x04 or 0x14, continuing anyway",
-             version);
+    ESP_LOGW(TAG, "  CC1101 VERSION=0x%02X unusual (expected 0x04 or 0x14). "
+                  "Continuing.", version);
   }
   return true;
 }
@@ -430,38 +461,65 @@ void BresserWeather::log_register_dump_() {
 // Component lifecycle
 // ---------------------------------------------------------------------------
 void BresserWeather::setup() {
-  ESP_LOGI(TAG, "Setting up bresser_weather (CC1101 SPI)...");
+  // FIRST line — if this isn't in the log, ESPHome isn't even calling us.
+  ESP_LOGI(TAG, "setup() entry");
   ESP_LOGI(TAG, "  pins MOSI=%d MISO=%d CLK=%d CS=%d GDO0=%d GDO2=%d",
            mosi_pin_, miso_pin_, clk_pin_, cs_pin_, gdo0_pin_, gdo2_pin_);
 
+  ESP_LOGI(TAG, "  configuring GPIOs...");
   pinMode(this->cs_pin_, OUTPUT);
   digitalWrite(this->cs_pin_, HIGH);
   pinMode(this->gdo0_pin_, INPUT);
   if (this->gdo2_pin_ >= 0) pinMode(this->gdo2_pin_, INPUT);
+  ESP_LOGI(TAG, "  GPIOs configured (CS=HIGH idle)");
 
-  this->spi_ = new SPIClass(VSPI);
-  // Pass -1 for CS so the bus driver leaves it to us.
-  this->spi_->begin(this->clk_pin_, this->miso_pin_, this->mosi_pin_, -1);
+  // Default-construct SPIClass so Arduino-ESP32 3.x picks the SoC's right
+  // peripheral (VSPI on classic, FSPI on S2/S3/C3). Passing 'VSPI' as a
+  // bus id breaks builds on non-classic SoCs and is unnecessary.
+  ESP_LOGI(TAG, "  creating SPIClass and calling begin()...");
+  this->spi_ = new SPIClass();
+  this->spi_->begin(this->clk_pin_, this->miso_pin_, this->mosi_pin_,
+                    this->cs_pin_);
   delay(10);
+  ESP_LOGI(TAG, "  SPI bus up");
+
+  // Quick loopback — drive a SNOP strobe (0x3D) and log the status byte.
+  // The first byte returned over MOSI when any strobe is sent is the
+  // CC1101 status byte. If MISO is dead this comes back as 0xFF.
+  ESP_LOGI(TAG, "  SPI sanity: sending SNOP strobe");
+  this->cc1101_select_();
+  this->cc1101_wait_miso_low_();
+  this->spi_->beginTransaction(this->spi_settings_);
+  uint8_t snop_status = this->spi_->transfer(0x3D);
+  this->spi_->endTransaction();
+  this->cc1101_deselect_();
+  ESP_LOGI(TAG, "  SNOP returned status byte=0x%02X (0xFF = MISO stuck high)",
+           snop_status);
 
   this->cc1101_reset_();
-  if (!this->cc1101_probe_()) {
-    ESP_LOGE(TAG, "CC1101 probe failed - component will be marked failed");
-    this->mark_failed();
-    return;
+
+  bool probe_ok = this->cc1101_probe_();
+  if (!probe_ok) {
+    ESP_LOGE(TAG, "CC1101 probe failed — keeping component active for "
+                  "diagnostics; expect bogus readings until wiring is fixed.");
+    // NB: deliberately NOT calling mark_failed() so dump_config / loop /
+    // status heartbeat keep running.
+  } else {
+    ESP_LOGI(TAG, "  CC1101 detected OK");
   }
 
   // Always pin the configured frequency into the canonical preset (index 0)
   // so users can move from EU 868.30 to e.g. US 915 without forking the code.
+  ESP_LOGI(TAG, "  applying default preset (canonical 8.21 kbps / 57 kHz)...");
   RadioPreset live = PRESETS[0];
   live.freq_hz = this->configured_freq_hz_;
   this->apply_preset_(live);
   this->log_register_dump_();
-  this->radio_ready_ = true;
+  this->radio_ready_ = probe_ok;
 
   this->scan_started_ms_ = millis();
-  ESP_LOGI(TAG, "CC1101 OK - listening on %.3f MHz",
-           this->configured_freq_hz_ / 1e6f);
+  ESP_LOGI(TAG, "setup() complete — listening on %.3f MHz (radio_ready=%s)",
+           this->configured_freq_hz_ / 1e6f, YESNO(this->radio_ready_));
   if (this->scan_mode_) {
     ESP_LOGI(TAG, "Scan mode ENABLED - cycling %u presets every %u ms",
              (unsigned) PRESET_COUNT, this->scan_interval_ms_);
@@ -469,9 +527,10 @@ void BresserWeather::setup() {
 }
 
 void BresserWeather::loop() {
-  if (!this->radio_ready_) return;
-
   uint32_t now = millis();
+  // Note: we deliberately keep the loop running even when radio_ready_ is
+  // false — the heartbeat below shows what the chip is responding with so
+  // a wiring/SPI bug can be diagnosed instead of silently disabled.
 
   // ---- scan mode cycling ----
   if (this->scan_mode_ &&
