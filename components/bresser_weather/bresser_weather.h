@@ -152,6 +152,20 @@ class BresserWeather : public Component {
 
   uint8_t prev_payload_[64]{};
   uint8_t prev_payload_len_{0};
+
+  // Diagnostic snapshot captured during setup() so loop() can re-emit it
+  // over the OTA log stream (which connects only after setup() completes).
+  uint8_t diag_snop_status_{0};
+  uint8_t diag_partnum_{0};
+  uint8_t diag_version_{0};
+  uint8_t diag_echo_written_[3]{0x55, 0xAA, 0x42};
+  uint8_t diag_echo_read_[3]{0, 0, 0};
+  bool diag_miso_pre_spi_high_{false};
+  bool diag_miso_post_spi_high_{false};
+  bool diag_miso_after_cs_low_{false};
+  bool diag_setup_done_{false};
+  uint32_t diag_first_dump_ms_{0};
+  int diag_dumps_emitted_{0};
 };
 
 }  // namespace bresser_weather

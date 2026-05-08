@@ -461,99 +461,87 @@ void BresserWeather::log_register_dump_() {
 // Component lifecycle
 // ---------------------------------------------------------------------------
 void BresserWeather::setup() {
-  // Setup logs use ESP_LOGE so they're always visible — even when the user's
-  // logger config has 'bresser_weather: WARN' or filters set up. Once a
-  // working version is reached, lower these to LOGI in a follow-up release.
-  ESP_LOGE(TAG, "=== bresser_weather setup() entry (v0.2.2) ===");
+  // setup() runs BEFORE the ESPHome API/OTA log stream is connected, so any
+  // ESP_LOGE here only reaches a serial console. We capture all diagnostic
+  // results into member fields so the early loop() iterations can re-emit
+  // them — that way the user sees them over OTA too.
+  ESP_LOGE(TAG, "=== bresser_weather setup() entry (v0.2.3) ===");
   ESP_LOGE(TAG, "  pins MOSI=%d MISO=%d CLK=%d CS=%d GDO0=%d GDO2=%d",
            mosi_pin_, miso_pin_, clk_pin_, cs_pin_, gdo0_pin_, gdo2_pin_);
 
-  ESP_LOGE(TAG, "  configuring GPIOs (MISO with INPUT_PULLUP)...");
+  // GPIO config — match wmbus_cc1101 exactly: plain INPUT on MISO (no pull-up).
+  // Arduino-ESP32 SPI.begin() will overwrite MISO mode anyway.
   pinMode(this->cs_pin_, OUTPUT);
   digitalWrite(this->cs_pin_, HIGH);
-  // MISO with internal pull-up: if the line is floating (chip not powered,
-  // not selected, etc.) we'd see HIGH instead of 0x00 reads, which is a far
-  // clearer fault signal than "all zeros".
-  pinMode(this->miso_pin_, INPUT_PULLUP);
+  pinMode(this->miso_pin_, INPUT);
   pinMode(this->gdo0_pin_, INPUT);
   if (this->gdo2_pin_ >= 0) pinMode(this->gdo2_pin_, INPUT);
-  ESP_LOGE(TAG, "  GPIOs configured (CS=HIGH idle, MISO=PULLUP)");
 
-  ESP_LOGE(TAG, "  pre-SPI MISO digital read=%s (HIGH expected = pull-up working)",
-           digitalRead(this->miso_pin_) ? "HIGH" : "LOW");
+  this->diag_miso_pre_spi_high_ = digitalRead(this->miso_pin_) == HIGH;
+  ESP_LOGE(TAG, "  pre-SPI MISO digital read=%s",
+           this->diag_miso_pre_spi_high_ ? "HIGH" : "LOW");
 
   // Default-construct SPIClass so Arduino-ESP32 3.x picks the SoC's right
-  // peripheral (VSPI on classic, FSPI on S2/S3/C3). Passing 'VSPI' as a
-  // bus id breaks builds on non-classic SoCs and is unnecessary.
+  // peripheral (VSPI on classic, FSPI on S2/S3/C3).
   ESP_LOGE(TAG, "  creating SPIClass and calling begin() at 1 MHz SPI clock...");
   this->spi_ = new SPIClass();
   this->spi_->begin(this->clk_pin_, this->miso_pin_, this->mosi_pin_,
                     this->cs_pin_);
+  // Explicitly disable hardware CS — we drive it manually like wmbus_cc1101.
+  this->spi_->setHwCs(false);
   delay(10);
-  ESP_LOGE(TAG, "  SPI bus up; post-begin MISO=%s",
-           digitalRead(this->miso_pin_) ? "HIGH" : "LOW");
+  this->diag_miso_post_spi_high_ = digitalRead(this->miso_pin_) == HIGH;
+  ESP_LOGE(TAG, "  SPI bus up; post-begin MISO=%s, CS pin reads=%s",
+           this->diag_miso_post_spi_high_ ? "HIGH" : "LOW",
+           digitalRead(this->cs_pin_) ? "HIGH" : "LOW");
 
   // ---- SNOP loopback ----
-  ESP_LOGE(TAG, "  >>> SPI sanity test: SNOP strobe (0x3D)");
   this->cc1101_select_();
-  bool miso_ready = this->cc1101_wait_miso_low_();
-  ESP_LOGE(TAG, "      after CS LOW, MISO went LOW: %s",
-           miso_ready ? "YES" : "NO/timeout");
+  this->diag_miso_after_cs_low_ = this->cc1101_wait_miso_low_();
   this->spi_->beginTransaction(this->spi_settings_);
-  uint8_t snop_status = this->spi_->transfer(0x3D);
+  this->diag_snop_status_ = this->spi_->transfer(0x3D);
   this->spi_->endTransaction();
   this->cc1101_deselect_();
-  ESP_LOGE(TAG, "      SNOP returned status byte=0x%02X (0xFF=MISO stuck high, "
-                "0x00=MISO stuck low / chip dead)", snop_status);
+  ESP_LOGE(TAG, "  SNOP: after CS LOW miso=%s, status byte=0x%02X",
+           this->diag_miso_after_cs_low_ ? "LOW(ready)" : "HIGH/timeout",
+           this->diag_snop_status_);
 
   this->cc1101_reset_();
 
-  // ---- Direct PARTNUM/VERSION read with verbose timing ----
-  ESP_LOGE(TAG, "  >>> probing PARTNUM(0x30 burst)...");
-  uint8_t partnum = this->cc1101_read_status_(reg::PARTNUM);
-  ESP_LOGE(TAG, "      PARTNUM=0x%02X", partnum);
-
-  ESP_LOGE(TAG, "  >>> probing VERSION(0x31 burst)...");
-  uint8_t version = this->cc1101_read_status_(reg::VERSION);
-  ESP_LOGE(TAG, "      VERSION=0x%02X (expected 0x04 or 0x14)", version);
+  this->diag_partnum_ = this->cc1101_read_status_(reg::PARTNUM);
+  this->diag_version_ = this->cc1101_read_status_(reg::VERSION);
+  ESP_LOGE(TAG, "  PARTNUM=0x%02X VERSION=0x%02X", this->diag_partnum_,
+           this->diag_version_);
 
   // ---- Write-then-read echo test on a benign writable register ----
-  // FSCTRL0 (0x0C) is an 8-bit signed offset that is fully writable; the chip
-  // accepts any value 0x00..0xFF. We round-trip three patterns to prove SPI
-  // both directions are working.
-  ESP_LOGE(TAG, "  >>> SPI echo test on FSCTRL0 (write then read back)");
-  for (uint8_t pattern : (uint8_t[]) {0x55, 0xAA, 0x42}) {
+  ESP_LOGE(TAG, "  echo test on FSCTRL0 (write→read three patterns):");
+  for (int i = 0; i < 3; ++i) {
+    uint8_t pattern = this->diag_echo_written_[i];
     this->cc1101_write_reg_(reg::FSCTRL0, pattern);
-    uint8_t got = this->cc1101_read_reg_(reg::FSCTRL0);
-    ESP_LOGE(TAG, "      wrote 0x%02X, read 0x%02X — %s", pattern, got,
-             (got == pattern) ? "OK" : "MISMATCH (SPI broken)");
+    this->diag_echo_read_[i] = this->cc1101_read_reg_(reg::FSCTRL0);
+    ESP_LOGE(TAG, "    wrote 0x%02X, read 0x%02X — %s", pattern,
+             this->diag_echo_read_[i],
+             (this->diag_echo_read_[i] == pattern) ? "OK" : "MISMATCH");
   }
-  this->cc1101_write_reg_(reg::FSCTRL0, 0x00);  // restore default
+  this->cc1101_write_reg_(reg::FSCTRL0, 0x00);
 
-  bool probe_ok = (version != 0x00 && version != 0xFF);
-  if (!probe_ok) {
-    ESP_LOGE(TAG, "  *** CC1101 probe FAILED. VERSION=0x%02X. ***", version);
-    ESP_LOGE(TAG, "  Keeping component active for further diagnostics; "
-                  "the heartbeat below will keep showing register state.");
+  bool probe_ok = (this->diag_version_ != 0x00 && this->diag_version_ != 0xFF);
+  if (probe_ok) {
+    ESP_LOGE(TAG, "  *** CC1101 detected OK ***");
   } else {
-    ESP_LOGE(TAG, "  *** CC1101 detected OK (PARTNUM=0x%02X VERSION=0x%02X) ***",
-             partnum, version);
+    ESP_LOGE(TAG, "  *** CC1101 probe FAILED — keeping component active ***");
   }
 
-  ESP_LOGE(TAG, "  applying default preset (canonical 8.21 kbps / 57 kHz)...");
   RadioPreset live = PRESETS[0];
   live.freq_hz = this->configured_freq_hz_;
   this->apply_preset_(live);
   this->log_register_dump_();
   this->radio_ready_ = probe_ok;
+  this->diag_setup_done_ = true;
 
   this->scan_started_ms_ = millis();
-  ESP_LOGE(TAG, "=== setup() complete — listening on %.3f MHz (radio_ready=%s) ===",
-           this->configured_freq_hz_ / 1e6f, YESNO(this->radio_ready_));
-  if (this->scan_mode_) {
-    ESP_LOGE(TAG, "Scan mode ENABLED - cycling %u presets every %u ms",
-             (unsigned) PRESET_COUNT, this->scan_interval_ms_);
-  }
+  ESP_LOGE(TAG, "=== setup() complete (radio_ready=%s) ===",
+           YESNO(this->radio_ready_));
 }
 
 void BresserWeather::loop() {
@@ -561,6 +549,76 @@ void BresserWeather::loop() {
   // Note: we deliberately keep the loop running even when radio_ready_ is
   // false — the heartbeat below shows what the chip is responding with so
   // a wiring/SPI bug can be diagnosed instead of silently disabled.
+
+  // ---- Re-emit setup() diagnostics over the OTA log stream ----
+  // setup() finishes before the ESPHome API/OTA log connects, so the [E]
+  // lines from setup() never reach the dashboard. We re-emit them three
+  // times: at first loop, then 5 s later, then 15 s later. After that we
+  // stop spamming.
+  if (this->diag_setup_done_ && this->diag_dumps_emitted_ < 3) {
+    bool fire = false;
+    if (this->diag_dumps_emitted_ == 0) {
+      this->diag_first_dump_ms_ = now;
+      fire = true;
+    } else if (this->diag_dumps_emitted_ == 1 &&
+               (now - this->diag_first_dump_ms_) >= 5000) {
+      fire = true;
+    } else if (this->diag_dumps_emitted_ == 2 &&
+               (now - this->diag_first_dump_ms_) >= 15000) {
+      fire = true;
+    }
+    if (fire) {
+      this->diag_dumps_emitted_++;
+      ESP_LOGE(TAG, "[BOOT-DIAG #%d] === setup() captures (re-emit for OTA) ===",
+               this->diag_dumps_emitted_);
+      ESP_LOGE(TAG, "[BOOT-DIAG] pins MOSI=%d MISO=%d CLK=%d CS=%d GDO0=%d GDO2=%d",
+               mosi_pin_, miso_pin_, clk_pin_, cs_pin_, gdo0_pin_, gdo2_pin_);
+      ESP_LOGE(TAG, "[BOOT-DIAG] pre-SPI MISO=%s, post-begin MISO=%s",
+               this->diag_miso_pre_spi_high_ ? "HIGH" : "LOW",
+               this->diag_miso_post_spi_high_ ? "HIGH" : "LOW");
+      ESP_LOGE(TAG, "[BOOT-DIAG] after CS LOW MISO went LOW: %s",
+               this->diag_miso_after_cs_low_ ? "YES" : "NO/timeout");
+      ESP_LOGE(TAG, "[BOOT-DIAG] SNOP status byte=0x%02X (expect 0x0F when OK; "
+                    "0x00 = MISO stuck LOW; 0xFF = MISO stuck HIGH)",
+               this->diag_snop_status_);
+      ESP_LOGE(TAG, "[BOOT-DIAG] PARTNUM=0x%02X VERSION=0x%02X (expect 0x00 / 0x14)",
+               this->diag_partnum_, this->diag_version_);
+      for (int i = 0; i < 3; ++i) {
+        ESP_LOGE(TAG, "[BOOT-DIAG] echo wrote=0x%02X read=0x%02X — %s",
+                 this->diag_echo_written_[i], this->diag_echo_read_[i],
+                 (this->diag_echo_written_[i] == this->diag_echo_read_[i])
+                     ? "OK"
+                     : "MISMATCH (SPI broken)");
+      }
+      // Verdict
+      bool any_echo_ok = false;
+      bool all_echo_ok = true;
+      for (int i = 0; i < 3; ++i) {
+        if (this->diag_echo_written_[i] == this->diag_echo_read_[i])
+          any_echo_ok = true;
+        else
+          all_echo_ok = false;
+      }
+      if (this->diag_snop_status_ == 0x00 && this->diag_partnum_ == 0x00 &&
+          this->diag_version_ == 0x00 && !any_echo_ok) {
+        ESP_LOGE(TAG, "[BOOT-DIAG] verdict: MISO line is dead/floating LOW. "
+                      "Most likely: chip not powered, MISO not connected, or "
+                      "wrong MISO pin. Compare to wmbus_cc1101 wiring.");
+      } else if (this->diag_snop_status_ == 0xFF &&
+                 this->diag_version_ == 0xFF && !any_echo_ok) {
+        ESP_LOGE(TAG, "[BOOT-DIAG] verdict: MISO line is floating HIGH. "
+                      "Most likely: CS pin not actually reaching chip, chip "
+                      "not powered, or hardware-CS interfering with manual.");
+      } else if (all_echo_ok) {
+        ESP_LOGE(TAG, "[BOOT-DIAG] verdict: SPI bidirectional WORKING. "
+                      "Bug must be downstream (register config / RX state).");
+      } else {
+        ESP_LOGE(TAG, "[BOOT-DIAG] verdict: SPI partially working. Bus "
+                      "integrity issue — try lower SPI clock or shorter wires.");
+      }
+      ESP_LOGE(TAG, "[BOOT-DIAG] === end ===");
+    }
+  }
 
   // ---- scan mode cycling ----
   if (this->scan_mode_ &&
@@ -600,7 +658,12 @@ void BresserWeather::loop() {
   uint8_t available = rxb_raw & 0x7F;
 
   if (overflow) {
-    ESP_LOGW(TAG, "RX FIFO overflow (rxbytes=0x%02X) - flushing", rxb_raw);
+    // Throttle the spam — when SPI is broken every iteration sees overflow.
+    static uint32_t last_overflow_log = 0;
+    if ((now - last_overflow_log) >= 5000) {
+      last_overflow_log = now;
+      ESP_LOGW(TAG, "RX FIFO overflow (rxbytes=0x%02X) - flushing", rxb_raw);
+    }
     this->cc1101_enter_rx_();
     return;
   }
