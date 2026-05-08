@@ -174,6 +174,12 @@ class BresserWeather : public Component {
   bool diag_setup_done_{false};
   uint32_t diag_first_dump_ms_{0};
   int diag_dumps_emitted_{0};
+
+  bool diag_cs_low_observed_{false};
+  bool diag_cs_high_observed_{false};
+  uint16_t diag_wake_test_bits_{0};
+  uint8_t diag_wake_test_highs_{0};
+  uint8_t diag_wake_test_lows_{0};
 };
 
 }  // namespace bresser_weather

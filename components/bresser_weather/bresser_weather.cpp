@@ -519,7 +519,7 @@ void BresserWeather::setup() {
   // ESP_LOGE here only reaches a serial console. We capture all diagnostic
   // results into member fields so the early loop() iterations can re-emit
   // them — that way the user sees them over OTA too.
-  ESP_LOGE(TAG, "=== bresser_weather setup() entry (v0.2.4) ===");
+  ESP_LOGE(TAG, "=== bresser_weather setup() entry (v0.2.5) ===");
   ESP_LOGE(TAG, "  pins MOSI=%d MISO=%d CLK=%d CS=%d GDO0=%d GDO2=%d",
            mosi_pin_, miso_pin_, clk_pin_, cs_pin_, gdo0_pin_, gdo2_pin_);
   ESP_LOGE(TAG, "  SPI mode: %s @ %u Hz",
@@ -572,6 +572,57 @@ void BresserWeather::setup() {
   ESP_LOGE(TAG, "  SPI ready; post-begin MISO=%s, CS pin reads=%s",
            this->diag_miso_post_spi_high_ ? "HIGH" : "LOW",
            digitalRead(this->cs_pin_) ? "HIGH" : "LOW");
+
+  // ---- CS pin self-test ----
+  // Drive CS LOW and HIGH while reading it back. If digitalRead doesn't
+  // follow our digitalWrite, GPIO5 isn't actually wired to itself (matrix
+  // hijack) or another component is fighting for the pin.
+  ESP_LOGE(TAG, "  CS self-test:");
+  digitalWrite(this->cs_pin_, LOW);
+  delayMicroseconds(50);
+  this->diag_cs_low_observed_ = digitalRead(this->cs_pin_) == LOW;
+  digitalWrite(this->cs_pin_, HIGH);
+  delayMicroseconds(50);
+  this->diag_cs_high_observed_ = digitalRead(this->cs_pin_) == HIGH;
+  ESP_LOGE(TAG, "    digitalWrite LOW  -> digitalRead %s",
+           this->diag_cs_low_observed_ ? "LOW (OK)" : "HIGH (PIN HIJACKED!)");
+  ESP_LOGE(TAG, "    digitalWrite HIGH -> digitalRead %s",
+           this->diag_cs_high_observed_ ? "HIGH (OK)" : "LOW (PIN HIJACKED!)");
+
+  // ---- GPIO wake test ----
+  // With CS LOW and SPI not yet running: pulse the CLK 16 times by hand
+  // and watch MISO. If the chip is alive on the bus, MISO MUST change at
+  // least once (CHIP_RDYn pulses, then status bits stream out).
+  // If MISO is unchanging through 16 clock pulses, the chip simply isn't
+  // hearing us — either CS isn't reaching the chip or the chip is dead.
+  ESP_LOGE(TAG, "  GPIO wake test (16 manual clock pulses):");
+  digitalWrite(this->cs_pin_, LOW);
+  delayMicroseconds(100);
+  this->diag_wake_test_highs_ = 0;
+  this->diag_wake_test_lows_ = 0;
+  this->diag_wake_test_bits_ = 0;
+  for (int i = 0; i < 16; ++i) {
+    digitalWrite(this->clk_pin_, HIGH);
+    delayMicroseconds(2);
+    int v = digitalRead(this->miso_pin_);
+    this->diag_wake_test_bits_ = (this->diag_wake_test_bits_ << 1) | (v ? 1 : 0);
+    if (v) this->diag_wake_test_highs_++; else this->diag_wake_test_lows_++;
+    digitalWrite(this->clk_pin_, LOW);
+    delayMicroseconds(2);
+  }
+  digitalWrite(this->cs_pin_, HIGH);
+  ESP_LOGE(TAG, "    MISO bit pattern across 16 clocks: 0x%04X "
+                "(highs=%d lows=%d)",
+           this->diag_wake_test_bits_, this->diag_wake_test_highs_,
+           this->diag_wake_test_lows_);
+  if (this->diag_wake_test_highs_ == 16 || this->diag_wake_test_lows_ == 16) {
+    ESP_LOGE(TAG, "    *** MISO did NOT change during 16 clock pulses. ***");
+    ESP_LOGE(TAG, "    *** Chip is not responding to our SPI bus.        ***");
+    ESP_LOGE(TAG, "    *** Likely causes: CS not reaching chip, chip not ***");
+    ESP_LOGE(TAG, "    *** powered, MISO not connected, or wrong pin.    ***");
+  } else {
+    ESP_LOGE(TAG, "    Good — MISO toggled, chip is alive on the bus.");
+  }
 
   // ---- SNOP loopback ----
   this->cc1101_select_();
@@ -658,6 +709,17 @@ void BresserWeather::loop() {
       ESP_LOGE(TAG, "[BOOT-DIAG] pre-SPI MISO=%s, post-begin MISO=%s",
                this->diag_miso_pre_spi_high_ ? "HIGH" : "LOW",
                this->diag_miso_post_spi_high_ ? "HIGH" : "LOW");
+      ESP_LOGE(TAG, "[BOOT-DIAG] CS pin self-test: write LOW->read %s, write HIGH->read %s",
+               this->diag_cs_low_observed_ ? "LOW (OK)" : "HIGH (HIJACK!)",
+               this->diag_cs_high_observed_ ? "HIGH (OK)" : "LOW (HIJACK!)");
+      ESP_LOGE(TAG, "[BOOT-DIAG] manual CLK pulse wake test: MISO bits=0x%04X "
+                    "(highs=%d lows=%d) %s",
+               this->diag_wake_test_bits_, this->diag_wake_test_highs_,
+               this->diag_wake_test_lows_,
+               (this->diag_wake_test_highs_ == 16 ||
+                this->diag_wake_test_lows_ == 16)
+                   ? "*** MISO never toggled — chip not responding ***"
+                   : "MISO toggled — chip alive");
       ESP_LOGE(TAG, "[BOOT-DIAG] after CS LOW MISO went LOW: %s",
                this->diag_miso_after_cs_low_ ? "YES" : "NO/timeout");
       ESP_LOGE(TAG, "[BOOT-DIAG] SNOP status byte=0x%02X (expect 0x0F when OK; "
@@ -681,16 +743,28 @@ void BresserWeather::loop() {
         else
           all_echo_ok = false;
       }
-      if (this->diag_snop_status_ == 0x00 && this->diag_partnum_ == 0x00 &&
+      bool cs_ok = this->diag_cs_low_observed_ && this->diag_cs_high_observed_;
+      bool miso_unchanging = (this->diag_wake_test_highs_ == 16 ||
+                              this->diag_wake_test_lows_ == 16);
+      if (!cs_ok) {
+        ESP_LOGE(TAG, "[BOOT-DIAG] verdict: CS pin (GPIO%d) is HIJACKED — "
+                      "another component or peripheral is driving it. Check "
+                      "your YAML for any other component using GPIO%d, "
+                      "remove ESPHome 'spi:' block if present.",
+                 this->cs_pin_, this->cs_pin_);
+      } else if (miso_unchanging && this->diag_wake_test_highs_ == 16) {
+        ESP_LOGE(TAG, "[BOOT-DIAG] verdict: MISO stuck HIGH through 16 manual "
+                      "clock pulses. Chip not responding. Most likely: CS not "
+                      "reaching chip, MISO miswired, or chip not powered.");
+      } else if (miso_unchanging && this->diag_wake_test_lows_ == 16) {
+        ESP_LOGE(TAG, "[BOOT-DIAG] verdict: MISO stuck LOW through 16 manual "
+                      "clock pulses. Chip not driving the line.");
+      } else if (this->diag_snop_status_ == 0x00 && this->diag_partnum_ == 0x00 &&
           this->diag_version_ == 0x00 && !any_echo_ok) {
-        ESP_LOGE(TAG, "[BOOT-DIAG] verdict: MISO line is dead/floating LOW. "
-                      "Most likely: chip not powered, MISO not connected, or "
-                      "wrong MISO pin. Compare to wmbus_cc1101 wiring.");
+        ESP_LOGE(TAG, "[BOOT-DIAG] verdict: MISO line is dead/floating LOW.");
       } else if (this->diag_snop_status_ == 0xFF &&
                  this->diag_version_ == 0xFF && !any_echo_ok) {
-        ESP_LOGE(TAG, "[BOOT-DIAG] verdict: MISO line is floating HIGH. "
-                      "Most likely: CS pin not actually reaching chip, chip "
-                      "not powered, or hardware-CS interfering with manual.");
+        ESP_LOGE(TAG, "[BOOT-DIAG] verdict: MISO line is floating HIGH.");
       } else if (all_echo_ok) {
         ESP_LOGE(TAG, "[BOOT-DIAG] verdict: SPI bidirectional WORKING. "
                       "Bug must be downstream (register config / RX state).");
