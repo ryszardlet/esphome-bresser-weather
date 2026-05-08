@@ -177,6 +177,10 @@ class BresserWeather : public Component {
 
   bool diag_cs_low_observed_{false};
   bool diag_cs_high_observed_{false};
+  bool diag_mosi_high_ok_{false};
+  bool diag_mosi_low_ok_{false};
+  bool diag_clk_high_ok_{false};
+  bool diag_clk_low_ok_{false};
   uint16_t diag_wake_test_bits_{0};
   uint8_t diag_wake_test_highs_{0};
   uint8_t diag_wake_test_lows_{0};

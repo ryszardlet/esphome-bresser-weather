@@ -519,7 +519,7 @@ void BresserWeather::setup() {
   // ESP_LOGE here only reaches a serial console. We capture all diagnostic
   // results into member fields so the early loop() iterations can re-emit
   // them — that way the user sees them over OTA too.
-  ESP_LOGE(TAG, "=== bresser_weather setup() entry (v0.2.5) ===");
+  ESP_LOGE(TAG, "=== bresser_weather setup() entry (v0.2.6) ===");
   ESP_LOGE(TAG, "  pins MOSI=%d MISO=%d CLK=%d CS=%d GDO0=%d GDO2=%d",
            mosi_pin_, miso_pin_, clk_pin_, cs_pin_, gdo0_pin_, gdo2_pin_);
   ESP_LOGE(TAG, "  SPI mode: %s @ %u Hz",
@@ -588,6 +588,35 @@ void BresserWeather::setup() {
            this->diag_cs_low_observed_ ? "LOW (OK)" : "HIGH (PIN HIJACKED!)");
   ESP_LOGE(TAG, "    digitalWrite HIGH -> digitalRead %s",
            this->diag_cs_high_observed_ ? "HIGH (OK)" : "LOW (PIN HIJACKED!)");
+
+  // ---- MOSI drive test ----
+  // Drive MOSI HIGH/LOW and read back. If digitalRead doesn't follow our
+  // digitalWrite, the chip never sees command bytes — explaining why
+  // register reads return chip's status byte (0x00) instead of register data.
+  ESP_LOGE(TAG, "  MOSI drive test:");
+  pinMode(this->mosi_pin_, OUTPUT);
+  digitalWrite(this->mosi_pin_, HIGH);
+  delayMicroseconds(50);
+  this->diag_mosi_high_ok_ = digitalRead(this->mosi_pin_) == HIGH;
+  digitalWrite(this->mosi_pin_, LOW);
+  delayMicroseconds(50);
+  this->diag_mosi_low_ok_ = digitalRead(this->mosi_pin_) == LOW;
+  ESP_LOGE(TAG, "    write HIGH -> read %s, write LOW -> read %s",
+           this->diag_mosi_high_ok_ ? "HIGH (OK)" : "LOW (DRIVER FAIL!)",
+           this->diag_mosi_low_ok_ ? "LOW (OK)" : "HIGH (DRIVER FAIL!)");
+
+  // ---- CLK drive test ----
+  ESP_LOGE(TAG, "  CLK drive test:");
+  pinMode(this->clk_pin_, OUTPUT);
+  digitalWrite(this->clk_pin_, HIGH);
+  delayMicroseconds(50);
+  this->diag_clk_high_ok_ = digitalRead(this->clk_pin_) == HIGH;
+  digitalWrite(this->clk_pin_, LOW);
+  delayMicroseconds(50);
+  this->diag_clk_low_ok_ = digitalRead(this->clk_pin_) == LOW;
+  ESP_LOGE(TAG, "    write HIGH -> read %s, write LOW -> read %s",
+           this->diag_clk_high_ok_ ? "HIGH (OK)" : "LOW (DRIVER FAIL!)",
+           this->diag_clk_low_ok_ ? "LOW (OK)" : "HIGH (DRIVER FAIL!)");
 
   // ---- GPIO wake test ----
   // With CS LOW and SPI not yet running: pulse the CLK 16 times by hand
@@ -709,9 +738,13 @@ void BresserWeather::loop() {
       ESP_LOGE(TAG, "[BOOT-DIAG] pre-SPI MISO=%s, post-begin MISO=%s",
                this->diag_miso_pre_spi_high_ ? "HIGH" : "LOW",
                this->diag_miso_post_spi_high_ ? "HIGH" : "LOW");
-      ESP_LOGE(TAG, "[BOOT-DIAG] CS pin self-test: write LOW->read %s, write HIGH->read %s",
-               this->diag_cs_low_observed_ ? "LOW (OK)" : "HIGH (HIJACK!)",
-               this->diag_cs_high_observed_ ? "HIGH (OK)" : "LOW (HIJACK!)");
+      ESP_LOGE(TAG, "[BOOT-DIAG] CS pin: %s | MOSI pin: %s | CLK pin: %s",
+               (this->diag_cs_low_observed_ && this->diag_cs_high_observed_)
+                   ? "OK" : "HIJACK!",
+               (this->diag_mosi_high_ok_ && this->diag_mosi_low_ok_)
+                   ? "OK" : "HIJACK/DRIVER FAIL!",
+               (this->diag_clk_high_ok_ && this->diag_clk_low_ok_)
+                   ? "OK" : "HIJACK/DRIVER FAIL!");
       ESP_LOGE(TAG, "[BOOT-DIAG] manual CLK pulse wake test: MISO bits=0x%04X "
                     "(highs=%d lows=%d) %s",
                this->diag_wake_test_bits_, this->diag_wake_test_highs_,
@@ -744,9 +777,20 @@ void BresserWeather::loop() {
           all_echo_ok = false;
       }
       bool cs_ok = this->diag_cs_low_observed_ && this->diag_cs_high_observed_;
+      bool mosi_ok = this->diag_mosi_high_ok_ && this->diag_mosi_low_ok_;
+      bool clk_ok = this->diag_clk_high_ok_ && this->diag_clk_low_ok_;
       bool miso_unchanging = (this->diag_wake_test_highs_ == 16 ||
                               this->diag_wake_test_lows_ == 16);
-      if (!cs_ok) {
+      if (!mosi_ok) {
+        ESP_LOGE(TAG, "[BOOT-DIAG] verdict: MOSI pin (GPIO%d) NOT DRIVING. "
+                      "Chip never sees commands. Check for another component "
+                      "fighting GPIO%d, or pin damage.",
+                 this->mosi_pin_, this->mosi_pin_);
+      } else if (!clk_ok) {
+        ESP_LOGE(TAG, "[BOOT-DIAG] verdict: CLK pin (GPIO%d) NOT DRIVING. "
+                      "Chip never sees clock edges.",
+                 this->clk_pin_);
+      } else if (!cs_ok) {
         ESP_LOGE(TAG, "[BOOT-DIAG] verdict: CS pin (GPIO%d) is HIJACKED — "
                       "another component or peripheral is driving it. Check "
                       "your YAML for any other component using GPIO%d, "
